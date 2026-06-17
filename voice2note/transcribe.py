@@ -48,13 +48,13 @@ def transcribe(audio_path, model_path, whisper_bin="whisper-cli", ffmpeg_bin="ff
         # 2. Convert to 16 kHz mono WAV for whisper.cpp.
         wav = tmp / "audio.wav"
         fp = runner(build_ffmpeg_cmd(local_audio, wav, ffmpeg_bin),
-                    capture_output=True, text=True, stdin=subprocess.DEVNULL)
+                    capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL)
         if fp.returncode != 0:
             raise RuntimeError(f"ffmpeg failed (exit {fp.returncode}): {(fp.stderr or '')[-500:]}")
         # 3. Transcribe.
         out_prefix = tmp / "out"
         wp = runner(build_whisper_cmd(wav, model_path, out_prefix, whisper_bin, language),
-                    capture_output=True, text=True, stdin=subprocess.DEVNULL)
+                    capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL)
         if wp.returncode != 0:
             raise RuntimeError(f"whisper-cli failed (exit {wp.returncode}): {(wp.stderr or '')[-500:]}")
         return read_transcript(f"{out_prefix}.txt")

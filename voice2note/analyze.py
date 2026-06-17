@@ -72,7 +72,7 @@ def analyze(transcript, codex_bin="codex", model=None, runner=subprocess.run):
         cmd = build_codex_cmd(build_prompt(transcript), out_path, codex_bin, model)
         # stdin=DEVNULL is essential: `codex exec` reads piped stdin if present, so
         # without a TTY (detached / launchd) it would block forever waiting for EOF.
-        proc = runner(cmd, capture_output=True, text=True, timeout=300,
+        proc = runner(cmd, capture_output=True, text=True, errors="replace", timeout=300,
                       stdin=subprocess.DEVNULL)
         if proc.returncode != 0:
             raise RuntimeError(f"codex failed (exit {proc.returncode}): {(proc.stderr or '')[:300]}")
