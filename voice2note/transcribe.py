@@ -35,7 +35,7 @@ def read_transcript(txt_path):
     path = Path(txt_path)
     if not path.exists():
         raise RuntimeError("whisper-cli produced no transcript file")
-    return path.read_text(encoding="utf-8").strip()
+    return path.read_text(encoding="utf-8", errors="replace").strip()
 
 
 def transcribe(audio_path, model_path, whisper_bin="whisper-cli", ffmpeg_bin="ffmpeg",

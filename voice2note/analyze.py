@@ -76,7 +76,7 @@ def analyze(transcript, codex_bin="codex", model=None, runner=subprocess.run):
                       stdin=subprocess.DEVNULL)
         if proc.returncode != 0:
             raise RuntimeError(f"codex failed (exit {proc.returncode}): {(proc.stderr or '')[:300]}")
-        with open(out_path, encoding="utf-8") as fh:
+        with open(out_path, encoding="utf-8", errors="replace") as fh:
             content = fh.read()
     finally:
         try:
