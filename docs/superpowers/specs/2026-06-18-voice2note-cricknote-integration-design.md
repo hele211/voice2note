@@ -1,262 +1,318 @@
 # voice2note → CrickNote Integration: classify recordings and route by type
 
 **Date:** 2026-06-18
-**Status:** Proposed design, pending implementation plan
-**Repos:** `voice2note` (engine changes) · `crickNote` (two skill additions)
+**Status:** Proposed design (Revision 2), pending implementation plan
+**Repos:** `voice2note` (engine changes) · `crickNote` (skills + agent-doc templates)
+
+## Revision history
+
+- **r2 (2026-06-18)** — hardened against data-loss/duplication failure modes
+  found in review: write-once with a hash guard (overwrite-after-triage),
+  resumable idempotent routing (duplicate appends/tasks), provisional
+  classification (no speaker labels), mandatory reindex (silent index failure),
+  dismiss/reclassify actions, multi-destination routing, explicit state model,
+  config validation, stdlib YAML escaping, and removal of the `busy_timeout`
+  engine change that contradicted the "no engine code" non-goal. See §13.
+- **r1** — initial two-stage design.
 
 ## 1. Goal
 
-Make voice2note classify each recording into one of three kinds and route it
-accordingly into a CrickNote-managed Obsidian vault:
+Make voice2note classify each recording and route it into a CrickNote-managed
+Obsidian vault:
 
 - **conversation** (dialogue with others) → summary note, no tasks.
 - **talk** (a presentation you attended) → summary note, no tasks.
 - **record** (you dictating experiment notes, thoughts, or a new idea) → summary
-  note **queued for human triage**; later routed — with your confirmation — into
-  a related experiment, a new idea note, or tasks.
+  note **queued for human triage**, then routed — with your confirmation — into a
+  related experiment, a new idea note, and/or tasks.
 
 voice2note stays an autonomous capture/transcribe/classify pipeline. CrickNote's
-agent (Claude Code / Codex, run from the vault) does the context-aware routing
-that needs the vault and a human in the loop. The two communicate only through
-notes in the vault — no direct API between them.
+agent (run from the vault) does the context-aware routing that needs the vault
+and a human in the loop. The two communicate only through notes in the vault.
 
 ## 2. Non-Goals
 
-- No port of voice2note to TypeScript. It remains a standalone Python pipeline;
-  the handoff is the CrickNote CLI (`cricknote tool …`).
-- No new CrickNote engine code (no new tools, DB columns, or migrations). The
-  CrickNote side is **two skill files**.
-- No knowledge-base mapping in the voice path. A routed record can later be fed
-  to the existing `cricknote-kb-update` skill when a deliberate KB mapping is
-  wanted; it is not part of triage.
+- No port of voice2note to TypeScript. The handoff is the CrickNote CLI.
+- **No CrickNote engine code** — no new tools, DB columns, migrations, or pragmas.
+  The CrickNote side is skill files plus two agent-doc template edits. (This is
+  why `busy_timeout`, considered in r1, is out of scope — see §9.)
+- No knowledge-base mapping in the voice path; run `cricknote-kb-update` on a
+  routed record later if wanted.
 - No automatic task creation for conversation/talk.
-- No two-device / vault-sync conflict resolution beyond what Obsidian + Nutstore
-  already do.
+- No speaker diarization in v1 (see §5).
 
-## 3. Context (verified)
+## 3. Context (verified against code)
 
-**voice2note** — `launchd` every ~2h → find new Voice Memos
-(`CloudRecordings.db`) → copy audio out of the protected folder → ffmpeg → 16 kHz
-wav → `whisper-cli` (local) → `codex exec` returns JSON (`summary`,
-`action_items`, `topics`, `notable_details`) → writes a per-memo note + a daily
-block directly with Python. `state.json` records processed memo IDs; any
-exception leaves a memo unprocessed for retry next run.
+**voice2note** — `launchd` (~2h) → find new memos (`CloudRecordings.db`) → copy
+audio out of the TCC-protected folder → ffmpeg → 16 kHz wav → `whisper-cli`
+(local, `-otxt -nt -np`, **plain text, no diarization** — `transcribe.py:23`) →
+`codex exec` → JSON → write note(s). `Memo.id` is the `.m4a` filename — a stable
+per-recording id (`memos.py:14,63`). `state.json` records processed ids; any
+exception leaves a memo for retry.
 
-**CrickNote** — a lab-notebook engine over the same Obsidian vault. You run an
-agent in the vault; it calls `cricknote tool <name> '<json>'` for all serialized
-writes. Verified facts that shape this design:
+**CrickNote** — lab-notebook engine over the vault; an agent calls
+`cricknote tool <name> '<json>'`. Verified facts that shape this design:
 
-- Vault: `/Users/le211/Nutstore Files/0 Obsidian/crickNote` (space in path,
+- Vault `/Users/le211/Nutstore Files/0 Obsidian/crickNote` (space in path,
   Nutstore-synced). `~/.cricknote/config.json` holds `vaultPath`; the CLI
-  resolves the vault from it, independent of the caller's working directory.
-- `Memory/` holds `Daily/`, `Weekly/`, `Monthly/`. **Every note under `Memory/`
-  is classified `noteType: diary`** (`src/ingestion/parser.ts:118`), which
-  requires frontmatter `date` and `type`, and validates `status` against
-  `{draft, in-progress, complete}` (warnings only — non-fatal).
-- `vault_write` creates missing parent folders — `SafeWriter.atomicWrite` does
-  `fs.mkdirSync(dir,{recursive:true})` then tmp-write + rename
-  (`src/editing/safe-writer.ts:306`).
-- `vault_list` reads the SQLite `note_metadata` table and filters on **fixed
-  columns only**: `date, experiment_type, project, status, project_id, series`
-  (`src/agent/tools/vault.ts:89`). There is **no** `triage`/`recording_type`
-  column. A `folder` value containing `/` matches by `path LIKE 'folder/%'`.
-- The CLI dispatcher applies pending edits by default and **incrementally
-  indexes every file it writes** (`src/cli/apply-edit.ts:85`), so a note written
-  through `cricknote tool` is immediately searchable.
-- `task_list` / `task_complete` scan **only** `Memory/Daily/`
-  (`src/agent/tools/tasks.ts:26`); `get_today_diary` / `get_week_plan` read only
-  the single `Memory/Daily/<date>.md` / `Memory/Weekly/<week>.md` file
-  (`src/agent/tools/context.ts`). Notes under `Memory/voiceMemo/` therefore do
-  not pollute task or diary logic.
-- DB opens in **WAL** mode (`src/storage/database.ts:16`).
-- `vault_append` errors if the target file does not exist
-  (`src/agent/tools/vault.ts:123`).
+  resolves the vault from it regardless of the caller's CWD.
+- **Every note under `Memory/` is `noteType: diary`** (`parser.ts:118`), requiring
+  frontmatter `date` + `type` and validating `status` ∈ {draft, in-progress,
+  complete} (warnings only).
+- `vault_write` creates missing parent folders (`safe-writer.ts:306`,
+  `mkdirSync(recursive)` then tmp-write+rename) and **overwrites** existing files
+  (`vault.ts:170`).
+- `vault_list` reads the SQLite `note_metadata` table, filters on **fixed columns
+  only** (`date, experiment_type, project, status, project_id, series`), and
+  returns **at most 50 rows** (`vault.ts:96`). A `folder` containing `/` matches
+  `path LIKE 'folder/%'`.
+- The CLI applies pending edits and incrementally indexes each write — **but an
+  index failure is logged and still reported as a successful write**
+  (`apply-edit.ts:84`). The file on disk is therefore the source of truth; the
+  index is derived and can lag.
+- `vault_append` **errors if the target file does not exist** (`vault.ts:123`).
+- `task_list`/`task_complete` scan only `Memory/Daily/` (`tasks.ts:26`);
+  `get_today_diary`/`get_week_plan` read only the single dated file
+  (`context.ts`). Notes under `Memory/voiceMemo/` do not pollute task/diary logic.
+- DB is WAL (`database.ts:16`).
+- `cricknote setup` **overwrites** the vault's `CLAUDE.md` *and* `AGENTS.md` from
+  `templates/agent-docs/`, and copies the repo `skills/` dir into the vault's
+  `.claude/skills/` + `.agents/skills/` (`install-agent-assets.ts:10-26`). Vault
+  files must therefore be edited via the repo templates/skills, not by hand.
 
 ## 4. Architecture: a two-stage pipeline
 
 ```
-STAGE 1 — unattended (voice2note, ~every 2h)
-  capture → transcribe (whisper.cpp) → classify type (codex exec → JSON)
-    → render one note (summary + transcript)
+STAGE 1 — unattended (voice2note, ~2h)
+  capture → transcribe → classify (provisional) → render one note
     → write to Memory/voiceMemo/ via `cricknote tool vault_write`
-         conversation / talk → status: complete   (finalized, terminal)
-         record              → status: draft       (enters the triage queue)
+         conversation / talk → status: complete            (finalized)
+         record / uncertain  → status: draft                (triage queue)
+         analysis failed     → transcript-only, status: draft, analysis: pending
 
-         ── the seam: frontmatter in Memory/voiceMemo/ ──
+         ── seam: notes in Memory/voiceMemo/, keyed by source_id ──
 
 STAGE 2 — human-in-the-loop (you + CrickNote agent, on review)
-  cricknote-voice-inbox skill:
-    vault_list {folder:"Memory/voiceMemo", status:"draft"}  (the pending queue)
-    → for each record: read it, agent proposes ONE destination, you confirm:
-         • append to a related experiment   (vault_search → vault_append)
-         • new idea note in Ideas/          (vault_write)
-         • tasks from to-dos                (task_add, optional Reminders)
-    → flip the note to status: complete + add a backlink to where it went
-  cricknote-daily-review: surfaces "N voice records pending triage"
+  cricknote-voice-inbox:
+    cricknote reindex                                   (MANDATORY first)
+    vault_list {folder:"Memory/voiceMemo", status:"draft" | "in-progress"}
+    → per record: read; you pick one OR MORE of:
+         • append to related experiment  (vault_search → vault_append + marker)
+         • new idea note in Ideas/        (vault_write)
+         • tasks from to-dos              (task_add + marker, deduped)
+       …or reclassify, or dismiss.
+    → progress recorded in frontmatter as each route completes;
+      status: draft → in-progress → complete (disposition: routed | dismissed)
+  cricknote-daily-review: surfaces "N voice records pending triage (50+ if capped)"
 ```
 
-**Why this split:** classification needs only the transcript, so it runs
-unattended in voice2note's existing `codex exec` call. Routing needs vault
-context (which experiment? which concept?) and a confirmation step, which only
-the in-vault agent has. Stage 1 never guesses a destination.
+**Stage 1 is create-only and write-once** (§7). It only creates notes in
+`Memory/voiceMemo/`, never touches an existing note's content beyond its own
+pristine output (hash-guarded), and never writes serialized notes.
 
-**Stage 1 is strictly create-only.** It only ever *creates* new notes in
-`Memory/voiceMemo/`. It never appends to or overwrites an existing note. This
-keeps it safely inside CrickNote's "freeform notes may be written directly" rule
-and means an unattended daemon can never corrupt serialized notes.
+## 5. Classification (provisional)
 
-## 5. Classification
+Done in voice2note's `codex exec` call (the only LLM change). Whisper output has
+**no speaker labels**, so type inference from content is imperfect — therefore:
 
-Done inside voice2note's `codex exec` analysis call (the only LLM change).
-
-- **conversation** — multiple speakers / back-and-forth dialogue.
-- **talk** — single presenter; you are audience.
-- **record** — you dictating: experiment notes, thoughts, a new idea.
-- **Ambiguity rule:** if the model's confidence is below threshold (default 0.5)
-  or the returned type is missing/invalid, classify as **record**. A misfiled
-  record (silently summarized, never triaged) is the expensive error; a
-  conversation that lands in the queue is a one-second dismissal. Bias to triage.
+- The **only behavior-changing distinction is record vs. not-record.**
+  conversation and talk are handled identically (summary, no tasks,
+  `status: complete`), so imprecise conv-vs-talk labeling is cosmetic.
+- **Ambiguity rule:** confidence `< VOICE2NOTE_CONFIDENCE_MIN` (default 0.5), or a
+  missing/invalid type, → **record** (queued). Nothing is silently shelved.
+- Classification is **provisional**: the inbox skill can **reclassify** or
+  **dismiss**. A record wrongly queued is a one-action dismiss (§8).
+- Future option (not v1): whisper.cpp `tinydiarize` (`-tdrz`, `*-tdrz` model)
+  for crude speaker-turn markers to improve the conv/talk split.
 
 ## 6. The data contract (the seam)
 
-Every voice note is written to `Memory/voiceMemo/<YYYY-MM-DD-HHMM>-<slug>.md`
-with this frontmatter. The fields are chosen to satisfy `Memory/` (diary)
-validation with **zero warnings** and to make the triage queue a real, indexed,
-one-call query:
+Note path: `Memory/voiceMemo/<YYYY-MM-DD-HHMM>-<slug>-<h8>.md`, where `h8` =
+first 8 hex of `sha256(source_id)`. The hash makes the filename **deterministic
+and collision-free** (two memos in the same minute with the same title no longer
+collide), and makes "does this memo already have a note?" a single-path check.
 
 ```yaml
 ---
-date: 2026-06-18          # required for Memory/ notes
-type: voice-memo          # required for Memory/ notes; not "daily-diary", so diary logic ignores it
-recording_type: record    # conversation | talk | record  (descriptive)
-status: draft             # draft = pending triage · complete = finalized/triaged
-classify_confidence: 0.62 # for auditing the ambiguity rule
+date: 2026-06-18              # required for Memory/ (diary) notes
+type: voice-memo              # required; NOT "daily-diary", so diary logic ignores it
+source_id: "ABCD-1234.m4a"    # stable Memo.id; the idempotency key
+recording_type: record        # conversation | talk | record  (provisional)
+classify_confidence: 0.62     # clamped float; audits the ambiguity rule
+analysis: complete            # complete | pending  (pending = transcript-only)
+status: draft                 # draft = pending triage · in-progress = routing · complete = done
+disposition:                  # (only when complete) routed | dismissed
+routed_to: []                 # backlinks recorded as routing progresses
 source: voice-memo
-title: "<memo title>"
+title: "<memo title>"         # YAML-escaped (§7)
 recorded: 2026-06-18T14:32
-tags: [voice-memo, <topics…>]
+tags: [voice-memo, <topics…>] # each tag YAML-escaped
 ---
 ```
 
-- conversation / talk → written `status: complete` (never in the queue).
-- record → written `status: draft`.
-- **Pending queue = `vault_list {folder:"Memory/voiceMemo", status:"draft"}`** —
-  one call, no extra reads, no schema change, no validation warnings.
+- conversation / talk → `status: complete` on write (never queued).
+- record / uncertain / analysis-failed → `status: draft`.
+- **Pending queue = `vault_list {folder:"Memory/voiceMemo", status:"draft"}`**
+  (plus `status:"in-progress"` to resume a crashed triage). One call, no schema
+  change, no validation warnings (`date`+`type` present, `status` valid).
 
-Note body (rendered by voice2note, reusing today's structure):
-`## Summary`, optionally `## Possible to-dos` (plain bullets — **never** dated
-`- [ ]` checkboxes, so nothing leaks into the task system), `## Topics`,
-`## Notable Details`, and `## Transcript` (collapsible callout). For
-conversation/talk the to-dos section is omitted or rendered as plain
-"Mentioned" bullets; tasks are deliberately not registered.
+Body: `## Summary`, optional `## Possible to-dos` (plain bullets — **never** dated
+`- [ ]` checkboxes, so nothing leaks into `task_list`), `## Topics`,
+`## Notable Details`, `## Transcript` (collapsible). conversation/talk omit the
+to-dos section.
 
-## 7. Stage 1 — voice2note changes (Python)
+## 7. Stage 1 — voice2note changes (Python, stdlib only)
 
-- **`voice2note/analyze.py`** — extend the prompt + `parse_analysis` to also
-  return `recording_type` ∈ {conversation, talk, record} and `confidence`
-  (0–1). Apply the ambiguity rule (default to `record`). No other analysis
-  change.
-- **`voice2note/routing.py`** (new, small, pure) — map `recording_type` →
-  `(status, include_todos)`: conversation/talk → `complete`, no todos; record →
-  `draft`, todos included. Single source of truth for routing policy; unit-tested
-  in isolation.
-- **`voice2note/notes.py`** — add the §6 frontmatter; render to-dos as plain
-  bullets (never checkboxes); drop the dated-checkbox action items and the
-  daily-note block. Replace the direct `path.write_text` with a writer that
-  shells out to `cricknote tool vault_write '{"path","content"}'` using a
-  **vault-relative** path (`Memory/voiceMemo/<file>.md`). The CLI resolves the
-  vault and auto-applies + indexes. The note (multi-line, with quotes) is passed
-  as a single argv element built with `json.dumps` via `subprocess.run([...],
-  shell=False)` — never string-interpolated into a shell command. Typical memo
-  JSON is far under macOS `ARG_MAX`; pathological transcripts are the only
-  size concern and can fall back to the direct write.
-- **`voice2note/config.py`** — add `VOICE2NOTE_USE_CRICKNOTE` (default on when a
-  cricknote bin is found), `VOICE2NOTE_CRICKNOTE_BIN` (absolute path), and
-  `VOICE2NOTE_MEMO_RELDIR` (default `Memory/voiceMemo`). `VOICE2NOTE_VAULT` must
-  point at the same vault as `~/.cricknote/config.json`. When
-  `VOICE2NOTE_USE_CRICKNOTE` is off, fall back to today's direct file write so
-  voice2note still works standalone.
-- **`voice2note/run.py`** — `process_memo` drops `append_to_daily`; writes the
-  single note via the new writer. The analysis-failed fallback writes a
-  transcript-only note as `recording_type: record`, `status: draft` so it
-  surfaces for attention. Retry semantics unchanged.
+**State model (`state.json`, v2), keyed by `source_id`:**
 
-## 8. Stage 2 — CrickNote changes (skills only)
+```
+memos[source_id] = {
+  note_rel, written_hash,            # sha256 of the exact content v2n last wrote
+  analysis: "complete" | "pending" | "abandoned",  # abandoned = you took over or deleted it
+  recording_type, updated
+}
+```
+Old `state.json` (set of processed names) migrates to `analysis: complete`, no
+hash (so never re-analyzed). A `source_id` present in `memos` is "seen".
 
-Sourced in the `crickNote` repo `skills/`, installed into the vault by
-`cricknote setup` (copied into `.claude/skills/` and `.agents/skills/`).
+**Write-once with hash guard (the core safety property):**
 
-- **New `cricknote-voice-inbox` skill:**
-  1. (optional) `cricknote reindex` to absorb hand-edits.
-  2. `cricknote tool vault_list '{"folder":"Memory/voiceMemo","status":"draft"}'`
-     — the pending queue.
-  3. For each record: `vault_read` it; the agent proposes **one** destination and
-     **waits for confirmation** (the existing KB confirm-gate pattern):
-     - **experiment** → `vault_search` for the related experiment, then
-       `vault_append` a timestamped entry to it.
-     - **idea** → `vault_write` a new freeform note in `Ideas/` (top-level;
-       classified `unknown`, so no required frontmatter).
-     - **tasks** → `task_add` for each accepted to-do (optional Reminders push
-       via `cricknote-reminders`).
-  4. Flip the voice note to `status: complete` (read → replace the `status:`
-     line → `vault_write`) and add a backlink (e.g. `Routed to [[IL003]]`) so the
-     archive records where the content went. This removes it from the queue.
-- **`cricknote-daily-review` hook:** add one step — count
-  `vault_list {folder:"Memory/voiceMemo", status:"draft"}` and surface
-  "N voice records pending triage."
-- **Vault `CLAUDE.md`:** one line noting `Memory/voiceMemo/` is a voice2note-owned
-  freeform folder and `Ideas/` is the idea-note destination.
+- **New memo:** transcribe → analyze.
+  - success → render full note; `cricknote tool vault_write`; store `written_hash`;
+    `analysis: complete`.
+  - failure → render transcript-only note (`analysis: pending`, `status: draft`,
+    `recording_type: record`); write; store `written_hash`; `analysis: pending`.
+    The memo is now visible and queued.
+- **Re-analysis pass** (memos with `analysis: pending`): read the note from disk.
+  - file missing → user deleted it → set `analysis: abandoned`; never resurrect.
+  - on-disk hash ≠ `written_hash` → you/the agent edited or triaged it → set
+    `analysis: abandoned`; never overwrite.
+  - on-disk hash == `written_hash` → still pristine → re-run analysis; on success
+    rewrite (preserving `source_id`; conv/talk → `status: complete`, record →
+    keep `draft`), update `written_hash`, `analysis: complete`. On failure leave
+    pending.
+- Transcription failure writes nothing (memo stays unseen) → safe retry.
+
+**Files:**
+
+- `analyze.py` — prompt + `parse_analysis` also return `recording_type` and
+  `confidence`; apply the ambiguity rule; coerce `confidence` to a clamped float
+  in [0,1] with a safe default (→ record) on garbage.
+- `routing.py` (new, pure) — `recording_type → (status, include_todos)`. Single
+  source of routing policy; unit-tested in isolation.
+- `notes.py` — emit the §6 frontmatter via a **stdlib YAML double-quoted-scalar
+  escaper** (`title`, each `tag`; escape `\`, `"`, control chars, collapse
+  newlines); render to-dos as plain bullets; drop dated checkboxes and the
+  daily-note block.
+- `vault_writer.py` (new) — build `cricknote tool vault_write '<json>'` with a
+  **vault-relative** path, JSON via `json.dumps`, `subprocess.run([...],
+  shell=False)`. A non-zero exit / error is a **failed write** → raise so the
+  memo is retried next run; **never silently fall back to a direct file write.**
+  Direct file write happens only when `VOICE2NOTE_USE_CRICKNOTE` is explicitly
+  off (standalone mode).
+- `config.py` — `VOICE2NOTE_USE_CRICKNOTE`, `VOICE2NOTE_CRICKNOTE_BIN`,
+  `VOICE2NOTE_MEMO_RELDIR` (default `Memory/voiceMemo`; **reject absolute paths
+  and `..`; must normalize within the vault**), `VOICE2NOTE_CONFIDENCE_MIN`.
+  **Validate vault equality:** canonicalize (`realpath`) `VOICE2NOTE_VAULT` and
+  `~/.cricknote/config.json`'s `vaultPath`; on mismatch, fail with a clear error
+  (in startup and `--check`).
+- `run.py` — drive new-vs-pending passes; drop `append_to_daily`.
+
+## 8. Stage 2 — CrickNote changes (skills + templates, no engine code)
+
+- **New `cricknote-voice-inbox` skill** (in repo `skills/`, installed by setup):
+  1. `cricknote reindex` — **mandatory**, so the queue reflects disk even if an
+     incremental index failed.
+  2. `vault_list '{"folder":"Memory/voiceMemo","status":"draft"}'` (and
+     `"in-progress"` to resume). If exactly 50 returned, tell the user the list is
+     capped.
+  3. Per record: `vault_read`; the agent proposes **one or more** destinations and
+     **waits for confirmation**:
+     - **experiment** → `vault_search`; `vault_append` a timestamped block ending
+       with an idempotency marker `<!-- v2n:<source_id> -->`. Re-check via
+       `vault_read` and skip if the marker is already present.
+     - **idea** → `vault_write` a new note in top-level `Ideas/` (classified
+       `unknown`; no required frontmatter).
+     - **tasks** → `task_add` each accepted to-do with a trailing `[v2n:<h8>]`
+       marker; dedupe by searching first (as `cricknote-reminders` does).
+     - **reclassify** → update `recording_type` (to conv/talk → `status:
+       complete`; stays record → remains `draft`).
+     - **dismiss** → `status: complete`, `disposition: dismissed`, no routing.
+  4. **Resumable progress:** set `status: in-progress` when routing starts; append
+     each finished target to `routed_to`; only after all chosen routes succeed set
+     `status: complete`, `disposition: routed`, with backlinks. A crash leaves
+     `in-progress` + partial `routed_to`; re-running resumes and markers prevent
+     duplicates.
+- **`cricknote-daily-review`** — add a step counting the pending queue (after the
+  mandatory reindex it already does) and surfacing it ("50+" when capped).
+- **Agent-doc templates** — edit repo `templates/agent-docs/CLAUDE.md` **and**
+  `AGENTS.md`: note `Memory/voiceMemo/` is voice2note-owned, `Ideas/` is the
+  idea-note destination, and `cricknote-voice-inbox` is the triage workflow.
 
 ## 9. Risks & mitigations
 
 | Risk | Mitigation |
 |---|---|
-| `SQLITE_BUSY` when the launchd write races an open agent session | WAL already serializes writers; voice2note retries the memo next run on any error. Hardening: add a `busy_timeout` pragma and one retry in voice2note's CLI-call wrapper. |
-| launchd minimal PATH can't find `cricknote`/`node` | `VOICE2NOTE_CRICKNOTE_BIN` absolute path; set PATH in the LaunchAgent plist. Same pattern voice2note already uses for whisper/ffmpeg/codex. |
-| Misclassification hides a record | Ambiguity rule biases low-confidence to `record`; conversation/talk are still listed in `Memory/voiceMemo/` so a wrong call is correctable by hand. |
-| Hand-edits in Obsidian leave the index stale | Session-start `cricknote reindex` (already the daily-review convention). |
-| Nutstore sync mid-write | Atomic tmp + rename; vault path never passed on a command line (CLI reads its own config), so the space in the path is irrelevant to shelling out. |
-| Diary validation warnings on voice notes | Frontmatter includes `date` + `type` and a valid `status`, so no warnings. |
+| Overwrite of a triaged note on retry | Write-once + `written_hash` guard (§7); deterministic `source_id`-hashed filename; voice2note never overwrites content it didn't last write |
+| Duplicate experiment append / tasks on retry | Per-route idempotency markers (`<!-- v2n:id -->`, `[v2n:h8]`) checked before acting; resumable `status`/`routed_to` progress (§8) |
+| Imperfect type from speaker-less transcript | Only record-vs-not-record matters; bias-to-record; provisional + reclassify/dismiss in triage |
+| Silent incremental-index failure hides a draft | File on disk is truth; **mandatory `reindex`** before listing; voice2note keys "written" on the file, not on indexing |
+| `vault_list` 50-row cap undercounts | Show "50+" when capped; design assumes regular triage keeps the queue small |
+| Auto direct-write bypasses indexing/audit | Direct write only in explicit standalone mode; CLI errors → retry, never silent fallback |
+| Wrong vault (config drift) | Canonical-path equality check at startup/`--check`; fail safely |
+| SQLITE_BUSY (launchd vs. open agent) | WAL serializes writers; voice2note retries next run. `busy_timeout` is an optional *separate* crickNote PR, not in scope (keeps "no engine code") |
+| Malformed YAML drops frontmatter (→ misclassified/unqueued) | stdlib double-quoted-scalar escaper for title/tags; clamped-float confidence; tests for hostile inputs |
+| Nutstore sync mid-write | Atomic tmp+rename; vault path never on a command line (CLI reads its own config) |
 
 ## 10. Configuration (new voice2note env)
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `VOICE2NOTE_USE_CRICKNOTE` | on if bin found | Route writes through `cricknote tool` vs. direct file write |
-| `VOICE2NOTE_CRICKNOTE_BIN` | `which cricknote` | Absolute path to the CrickNote CLI |
-| `VOICE2NOTE_MEMO_RELDIR` | `Memory/voiceMemo` | Vault-relative folder for voice notes |
-| `VOICE2NOTE_CONFIDENCE_MIN` | `0.5` | Below this, force `recording_type: record` |
+| `VOICE2NOTE_USE_CRICKNOTE` | on if bin found | Route writes through `cricknote tool` vs. standalone direct write |
+| `VOICE2NOTE_CRICKNOTE_BIN` | `which cricknote` | Absolute path to the CrickNote CLI (set in the LaunchAgent for launchd PATH) |
+| `VOICE2NOTE_MEMO_RELDIR` | `Memory/voiceMemo` | Vault-relative folder; absolute/`..` rejected |
+| `VOICE2NOTE_CONFIDENCE_MIN` | `0.5` | Below this → force `recording_type: record` |
 
-`VOICE2NOTE_VAULT` must equal the `vaultPath` in `~/.cricknote/config.json`.
+`VOICE2NOTE_VAULT` must canonically equal `~/.cricknote/config.json`'s
+`vaultPath` (validated; hard failure on mismatch).
 
-## 11. Testing
+## 11. Testing (TDD; existing 26 tests updated where behavior changes)
 
-- **voice2note (unittest):** `parse_analysis` extracts/defaults
-  `recording_type` + `confidence`; ambiguity rule forces `record`; `routing.py`
-  status/todos per type; `notes.py` renders the §6 frontmatter and never emits
-  `- [ ]` lines; the CLI-writer builds the correct `cricknote tool vault_write`
-  argv (subprocess mocked) and falls back to direct write when disabled.
-- **CrickNote (vitest + temp vault):** a note written into `Memory/voiceMemo/`
-  with `status:draft` is returned by the queue query and not by `task_list`;
-  routing appends to an experiment / writes an `Ideas/` note / adds a task; the
-  status flip removes it from the queue. Skills validated from the vault dir with
-  both Claude Code and Codex.
+- **voice2note (unittest):**
+  - `parse_analysis` extracts/defaults `recording_type`; `confidence` coercion
+    (string, out-of-range, missing) → clamped float; ambiguity rule → record.
+  - `routing.py` status/todos per type.
+  - YAML escaper: titles with `"`, `:`, `\`, newlines, emoji; tag lists → output
+    re-parses to the original values.
+  - **Write-once/hash guard:** new→write; pending+pristine→re-analyze+update;
+    pending+modified→skip (no overwrite); missing file→no resurrect; filename
+    determinism + collision (same minute+title, different `source_id`).
+  - `vault_writer` builds correct argv (subprocess mocked); CLI error raises (no
+    direct-write); standalone mode writes directly.
+  - config: vault-equality mismatch fails; `MEMO_RELDIR` rejects absolute/`..`.
+  - `notes.py` emits no `- [ ]` lines; no daily block.
+- **CrickNote (vitest + temp vault):** a `status:draft` note in `Memory/voiceMemo/`
+  is returned by the queue query and **not** by `task_list`; multi-destination
+  routing appends-with-marker / writes an `Ideas/` note / adds a deduped task;
+  re-running a partially-routed note does not duplicate; status/disposition
+  transitions; dismiss and reclassify leave the queue correctly. Skills validated
+  from the vault dir with Claude Code and Codex.
 
 ## 12. Phases
 
-1. **voice2note:** classification + ambiguity rule; §6 frontmatter; `routing.py`;
-   create-only `cricknote tool vault_write` path with standalone fallback; drop
-   daily block. Tests.
-2. **CrickNote:** `cricknote-voice-inbox` skill + daily-review hook + CLAUDE.md
-   line; validate against the real vault.
-3. **Hardening:** `busy_timeout` + CLI-call retry; LaunchAgent PATH/bin; README
-   updates in both repos.
+1. **voice2note:** classification + ambiguity rule; §6 contract + YAML escaper;
+   `routing.py`; `state.json` v2 + write-once/hash-guard + re-analysis pass;
+   create-only `vault_writer` (no silent fallback); config validation; drop daily
+   block. Tests.
+2. **CrickNote:** `cricknote-voice-inbox` skill (mandatory reindex, multi-route,
+   idempotency markers, resumable progress, dismiss/reclassify) + daily-review
+   hook + `CLAUDE.md`/`AGENTS.md` template edits. Validate against the real vault.
+3. **Hardening/docs:** LaunchAgent PATH/bin; README updates in both repos;
+   (optional, separate) crickNote `busy_timeout` PR if contention is observed.
 
 ## 13. Open questions
 
-- None blocking. KB mapping stays out of the voice path by decision (§2); use
-  `cricknote-kb-update` on a routed record later if wanted.
-- A future enhancement could add a one-line linked summary into
-  `Memory/Daily/<date>.md`, but it is deferred to keep Stage 1 strictly
-  create-only (and because `vault_append` requires the daily note to already
-  exist).
+- None blocking. KB mapping stays out of the voice path by decision (§2).
+- A `Memory/Daily/` one-line linked summary is deferred (would break Stage 1's
+  create-only property; `vault_append` also requires the daily note to exist).
+- Diarization (`tinydiarize`) deferred to a future iteration (§5).
