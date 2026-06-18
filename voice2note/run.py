@@ -55,6 +55,8 @@ def check_access():
 
 
 def write_memo(cfg, rel, content):
+    """Write content to rel inside the vault. Raises on failure in the cricknote
+    path, so the caller's state.record is skipped and the memo retries next run."""
     if cfg.USE_CRICKNOTE:
         write_note(cfg.CRICKNOTE_BIN, rel, content)  # raises → retried next run
     else:
@@ -79,15 +81,15 @@ def process_memo(memo, state, cfg):
         state.save()
         return
 
-    if not materialize(memo.path, brctl_bin=config.BRCTL_BIN):
+    if not materialize(memo.path, brctl_bin=cfg.BRCTL_BIN):
         log.warning("Could not download %s; will retry next run.", memo.id)
         return
-    transcript = transcribe(memo.path, config.WHISPER_MODEL_PATH,
-                            whisper_bin=config.WHISPER_CLI_BIN,
-                            ffmpeg_bin=config.FFMPEG_BIN,
-                            language=config.WHISPER_LANGUAGE)
+    transcript = transcribe(memo.path, cfg.WHISPER_MODEL_PATH,
+                            whisper_bin=cfg.WHISPER_CLI_BIN,
+                            ffmpeg_bin=cfg.FFMPEG_BIN,
+                            language=cfg.WHISPER_LANGUAGE)
     try:
-        analysis = analyze(transcript, codex_bin=config.CODEX_BIN, model=config.CODEX_MODEL)
+        analysis = analyze(transcript, codex_bin=cfg.CODEX_BIN, model=cfg.CODEX_MODEL)
         rtype = effective_type(analysis["recording_type"], analysis["confidence"], cfg.CONFIDENCE_MIN)
         status, include_todos = route_for(rtype)
         content = render_memo_note(memo, analysis, transcript, recording_type=rtype,

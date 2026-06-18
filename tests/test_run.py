@@ -14,7 +14,10 @@ def make_cfg(vault, use_cricknote=False):
     return SimpleNamespace(
         VAULT=Path(vault), MEMO_RELDIR="Memory/voiceMemo",
         USE_CRICKNOTE=use_cricknote, CRICKNOTE_BIN="cricknote",
-        CONFIDENCE_MIN=0.5)
+        CONFIDENCE_MIN=0.5,
+        BRCTL_BIN="brctl", WHISPER_MODEL_PATH="model.bin",
+        WHISPER_CLI_BIN="whisper-cli", FFMPEG_BIN="ffmpeg",
+        WHISPER_LANGUAGE="auto", CODEX_BIN="codex", CODEX_MODEL="gpt-5.5")
 
 
 def memo(mid="a.m4a", title="Idea"):
@@ -74,6 +77,7 @@ class TestProcessMemo(unittest.TestCase):
         self.assertIn("analysis: pending", out)
         self.assertIn("status: draft", out)
         self.assertIn("the transcript", out)
+        self.assertTrue(self.state.is_seen("a.m4a"))  # recorded → not retried/overwritten
 
 
 class TestCheckGating(unittest.TestCase):
