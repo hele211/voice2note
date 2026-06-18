@@ -2,6 +2,7 @@
 Saved atomically so a crash mid-write can't corrupt the file."""
 import json
 import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -34,9 +35,16 @@ class State:
         if last_run is not None:
             self.last_run = last_run
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(
-            json.dumps({"memos": self.memos, "last_run": self.last_run}, indent=2),
-            encoding="utf-8",
-        )
-        os.replace(tmp, self.path)
+        # Unique temp name in the same dir (same filesystem → os.replace is atomic);
+        # clean up on any failure so a crashed save never orphans a .tmp file.
+        fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=self.path.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump({"memos": self.memos, "last_run": self.last_run}, fh, indent=2)
+            os.replace(tmp, self.path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise

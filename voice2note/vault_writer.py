@@ -25,13 +25,18 @@ def note_exists(vault, rel_path):
     return (Path(vault) / rel_path).exists()
 
 
+# Matches a top-level "key: value" frontmatter line (precompiled; scanned per line).
 _FM_LINE = re.compile(r'^([a-zA-Z_]+):\s*(.*)$')
 
 
 def read_frontmatter(vault, rel_path):
     """Minimal frontmatter reader: returns scalar string fields from the leading
-    --- block. Enough for the adopt check (source_id, analysis, recording_type)."""
-    text = (Path(vault) / rel_path).read_text(encoding="utf-8", errors="replace")
+    --- block. Enough for the adopt check (source_id, analysis, recording_type).
+    Returns {} if the note is missing or has no frontmatter block."""
+    p = Path(vault) / rel_path
+    if not p.exists():
+        return {}
+    text = p.read_text(encoding="utf-8", errors="replace")
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         return {}
@@ -41,5 +46,5 @@ def read_frontmatter(vault, rel_path):
             break
         m = _FM_LINE.match(line)
         if m:
-            out[m.group(1)] = m.group(2).strip().strip('"')
+            out[m.group(1)] = m.group(2).strip().strip("'\"")
     return out
