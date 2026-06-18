@@ -75,6 +75,9 @@ class TestRecordingType(unittest.TestCase):
     def test_confidence_extracted(self):
         self.assertEqual(self._parse(confidence=0.8)["confidence"], 0.8)
 
+    def test_confidence_clamped_end_to_end(self):
+        self.assertEqual(self._parse(confidence=1.5)["confidence"], 1.0)
+
 
 class TestCoerceConfidence(unittest.TestCase):
     def test_numeric_string(self):

@@ -39,7 +39,7 @@ def render_memo_note(memo, analysis, transcript, *, recording_type, confidence,
         "routed_to: []",
         "source: voice-memo",
         f"title: {dq(memo.title)}",
-        f"recorded: {memo.recorded_at.isoformat(timespec='minutes')}",
+        f'recorded: "{memo.recorded_at.isoformat(timespec="minutes")}"',
         f"tags: {seq(['voice-memo'] + list(topics))}",
         "---",
     ]
