@@ -1,7 +1,7 @@
 # voice2note → CrickNote Integration: classify recordings and route by type
 
 **Date:** 2026-06-18
-**Status:** Proposed design (Revision 3), pending implementation plan
+**Status:** Approved for implementation (Revision 4)
 **Repos:** `voice2note` (engine changes) · `crickNote` (skills + agent-doc templates)
 
 > **Implementation status: not started.** This is a design document. No source in
@@ -15,6 +15,12 @@
 
 ## Revision history
 
+- **r4 (2026-06-18)** — third review round (approved pending these four):
+  per-task marker `[v2n:<memo-h16>:<task-h8>]` so a partial retry doesn't skip a
+  memo's still-unfinished tasks; note adoption **verifies `source_id`** and errors
+  on missing/mismatch instead of silently adopting; a single-instance
+  `flock` lock is **mandatory** (not optional); the vault/config equality check
+  runs **only when `USE_CRICKNOTE=true`** (standalone needs no CrickNote config).
 - **r3 (2026-06-18)** — second review round. **Dropped hash-guarded
   re-analysis** (its re-check→write window is a real TOCTOU that the CLI's
   snapshot-less `vault_write` cannot guard, and a compare-and-swap tool would be
@@ -24,7 +30,7 @@
   window. Idea routing gets a deterministic path + marker. `USE_CRICKNOTE` is an
   explicit boolean (no auto-detect). Hashes are ≥16 hex (collision-resistant, not
   "collision-free"). Testing split: unittest/Vitest for code, **manual acceptance
-  tests** for skill orchestration. See §13.
+  tests** for skill orchestration.
 - **r2** — hardened against data-loss modes (write-once, resumable routing,
   provisional classification, mandatory reindex, etc.).
 - **r1** — initial two-stage design.
@@ -100,9 +106,9 @@ and a daily-note block — both change in this design.
 ## 4. Architecture: a two-stage pipeline
 
 ```
-STAGE 1 — unattended (voice2note, ~2h), strictly create-once
-  capture → transcribe → classify (provisional) → render one note
-    → IF the deterministic note path already exists: adopt into state, do NOT write
+STAGE 1 — unattended (voice2note, ~2h), single-instance, strictly create-once
+  acquire flock → capture → transcribe → classify (provisional) → render one note
+    → IF the deterministic note path already exists (source_id verified): adopt, no write
     → ELSE write to Memory/voiceMemo/ via `cricknote tool vault_write`
          conversation / talk → status: complete            (finalized)
          record / uncertain  → status: draft                (triage queue)
@@ -117,8 +123,8 @@ STAGE 2 — human-in-the-loop (you + CrickNote agent, on review)
     → per record: read; if analysis: pending, summarize it first; then you pick
       one OR MORE of:
          • append to related experiment  (vault_search → vault_append + marker)
-         • new idea note in Ideas/        (deterministic path + marker)
-         • tasks from to-dos              (task_add + marker, deduped)
+         • new idea note in Ideas/        (deterministic path + source_id marker)
+         • tasks from to-dos              (task_add + per-task marker, deduped)
        …or reclassify, or dismiss.
     → progress recorded in frontmatter as each route completes;
       status: draft → in-progress → complete (disposition: routed | dismissed)
@@ -127,8 +133,8 @@ STAGE 2 — human-in-the-loop (you + CrickNote agent, on review)
 
 **voice2note never overwrites an existing note.** The only write is a *create* at
 a deterministic, source-id-derived path; if that path exists, it is adopted into
-state and left untouched. This eliminates overwrite-after-triage entirely, with no
-dependency on conflict detection.
+state (after verifying `source_id`) and left untouched. This eliminates
+overwrite-after-triage entirely, with no dependency on conflict detection.
 
 ## 5. Classification (provisional)
 
@@ -187,6 +193,12 @@ Body: `## Summary`, optional `## Possible to-dos` (plain bullets — **never** d
 
 ## 7. Stage 1 — voice2note changes (Python, stdlib only)
 
+**Single-instance lock (mandatory).** launchd's interval only serializes its own
+scheduled runs; a manual `launchctl start` or `./run.sh` can run concurrently with
+a scheduled run, and both could pass the existence check (step 3) for the same new
+memo and write it twice. So at startup acquire an exclusive `fcntl.flock` on a lock
+file; if it is already held, exit immediately.
+
 **State model (`state.json`, v2), keyed by `source_id`:**
 
 ```
@@ -197,12 +209,15 @@ migrates: each id → `{ analysis: "complete" }` (already handled; never revisit
 **`save()` becomes atomic** (write a temp file, `os.replace` over the target) so a
 crash mid-save can't corrupt state.
 
-**Create-once flow, per memo each run:**
+**Create-once flow, per memo each run (under the lock):**
 
 1. Compute the deterministic note path from `source_id` (§6).
 2. `source_id` already in `state.memos` → already handled → skip.
 3. Else the note **file exists on disk** (a crash wrote it before state was saved)
-   → read its frontmatter, record it into `state.memos`, **do not rewrite**.
+   → read its frontmatter and **verify `source_id` matches**:
+   - matches → record it into `state.memos`, **do not rewrite**.
+   - missing or different (stray file / hash collision at the path) → **stop with
+     an error**; neither adopt nor overwrite; leave the memo for the operator.
 4. Else transcribe + analyze:
    - success → render full note → `cricknote tool vault_write` (create) →
      record state (`analysis: complete`).
@@ -211,9 +226,6 @@ crash mid-save can't corrupt state.
      pending`). The memo is now visible and queued; voice2note never revisits it.
    - transcription failure → write nothing, record nothing → safe retry next run.
 5. `state.save()` (atomic) after each memo, narrowing the unsaved window to one.
-
-voice2note assumes a single instance (launchd's interval serializes runs); a
-PID/lock file is optional hardening.
 
 **Files:**
 
@@ -239,10 +251,11 @@ PID/lock file is optional hardening.
   - `VOICE2NOTE_CRICKNOTE_BIN`, `VOICE2NOTE_CONFIDENCE_MIN`.
   - `VOICE2NOTE_MEMO_RELDIR` (default `Memory/voiceMemo`; **reject absolute paths
     and `..`; must normalize within the vault**).
-  - **Validate vault equality:** canonicalize (`realpath`) `VOICE2NOTE_VAULT` and
-    `~/.cricknote/config.json`'s `vaultPath`; on mismatch, fail clearly (startup
-    and `--check`).
-- `run.py` — drive the create-once flow; drop `append_to_daily`.
+  - **Validate vault equality — only when `USE_CRICKNOTE=true`:** canonicalize
+    (`realpath`) `VOICE2NOTE_VAULT` and `~/.cricknote/config.json`'s `vaultPath`;
+    on mismatch, fail clearly (startup and `--check`). In standalone mode
+    (`false`) CrickNote config is **not** read or required.
+- `run.py` — acquire the lock; drive the create-once flow; drop `append_to_daily`.
 
 ## 8. Stage 2 — CrickNote changes (skills + templates, no engine code)
 
@@ -259,10 +272,15 @@ PID/lock file is optional hardening.
      - **experiment** → `vault_search`; `vault_append` a timestamped block ending
        with `<!-- v2n:<source_id> -->`. Re-read and skip if the marker is present.
      - **idea** → create `Ideas/<slug>-<h16>.md` (deterministic, `unknown` note
-       type, no required frontmatter) carrying `source_id`; **check existence
-       first** and skip if present.
-     - **tasks** → `task_add` each accepted to-do with a trailing `[v2n:<h16>]`
-       marker; dedupe by searching first (as `cricknote-reminders` does).
+       type, no required frontmatter) carrying `source_id`. **Check existence
+       first and verify the on-disk `source_id` matches** before treating it as
+       already-created (a different/missing `source_id` is a real collision → stop
+       and pick another slug, don't overwrite).
+     - **tasks** → `task_add` each accepted to-do with a trailing **per-task**
+       marker `[v2n:<memo-h16>:<task-h8>]` (`task-h8` = first 8 hex of
+       `sha256(normalized task text)`); dedupe by searching that **exact** marker
+       first (as `cricknote-reminders` does). A per-memo-only marker would make a
+       partial retry skip the memo's still-unfinished tasks.
      - **reclassify** → update `recording_type` (to conv/talk → `status:
        complete`; stays record → remains `draft`).
      - **dismiss** → `status: complete`, `disposition: dismissed`, no routing.
@@ -282,14 +300,16 @@ PID/lock file is optional hardening.
 | Risk | Mitigation |
 |---|---|
 | Overwrite of a triaged note on retry | voice2note is write-once; a *create* only happens when the deterministic path is absent (existence check, §7); existing notes are never rewritten |
-| Crash after write, before `state.save` | Pre-write existence check adopts the on-disk note into state without rewriting; `state.save` is atomic (temp + `os.replace`) |
+| Crash after write, before `state.save` | Pre-write existence check adopts the on-disk note (after verifying its `source_id`) without rewriting; `state.save` is atomic (temp + `os.replace`) |
+| Two concurrent voice2note runs race the existence check | Mandatory `fcntl.flock` single-instance lock at startup; a second run exits immediately (§7) |
+| Adopting a stray/colliding file at the deterministic path | Step 3 verifies the on-disk `source_id`; missing/mismatch → hard error, no adopt and no overwrite |
 | Concurrent edit during background re-analysis (TOCTOU) | Eliminated: voice2note does **not** re-analyze; transcript-only notes are summarized by the triage agent with a human present |
-| Duplicate experiment append / idea note / tasks on retry | Deterministic idea path; per-route markers (`<!-- v2n:id -->`, `[v2n:h16]`) checked before acting; resumable `status`/`routed_to` progress (§8) |
+| Duplicate experiment append / idea note / tasks on retry | Deterministic idea path; per-route markers — `<!-- v2n:source_id -->` (append), `[v2n:memo-h16:task-h8]` (per task) — checked before acting; resumable `status`/`routed_to` progress (§8) |
 | Imperfect type from speaker-less transcript | Only record-vs-not-record matters; bias-to-record; provisional + reclassify/dismiss |
 | Silent incremental-index failure hides a draft | File on disk is truth; **mandatory `reindex`** before listing |
 | `vault_list` 50-row cap undercounts | Show "50+" when capped; design assumes regular triage |
 | Auto direct-write bypasses indexing/audit | `USE_CRICKNOTE` is explicit; `true` + missing CLI fails; CLI errors → retry, never silent fallback |
-| Wrong vault (config drift) | Canonical-path equality check at startup/`--check`; fail safely |
+| Wrong vault (config drift) | When `USE_CRICKNOTE=true`, canonical-path equality check at startup/`--check`; fail safely. Standalone needs no CrickNote config |
 | SQLITE_BUSY (launchd vs. open agent) | WAL serializes writers; voice2note retries next run. `busy_timeout` is an optional *separate* crickNote PR, out of scope (keeps "no engine code") |
 | Malformed YAML drops frontmatter | stdlib double-quoted-scalar escaper for title/tags; clamped-float confidence; tests for hostile inputs |
 | Nutstore sync mid-write | Atomic tmp+rename; vault path never on a command line |
@@ -298,13 +318,14 @@ PID/lock file is optional hardening.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `VOICE2NOTE_USE_CRICKNOTE` | `false` | Explicit `true`/`false`. `true` routes writes through `cricknote tool` (missing CLI → hard fail); `false` = standalone direct write |
+| `VOICE2NOTE_USE_CRICKNOTE` | `false` | Explicit `true`/`false`. `true` routes writes through `cricknote tool` (missing CLI → hard fail); `false` = standalone direct write, no CrickNote config required |
 | `VOICE2NOTE_CRICKNOTE_BIN` | `which cricknote` | Absolute path to the CLI (set in the LaunchAgent for launchd PATH) |
 | `VOICE2NOTE_MEMO_RELDIR` | `Memory/voiceMemo` | Vault-relative folder; absolute/`..` rejected |
 | `VOICE2NOTE_CONFIDENCE_MIN` | `0.5` | Below this → force `recording_type: record` |
 
-`VOICE2NOTE_VAULT` must canonically equal `~/.cricknote/config.json`'s
-`vaultPath` (validated; hard failure on mismatch).
+Only when `USE_CRICKNOTE=true`: `VOICE2NOTE_VAULT` must canonically equal
+`~/.cricknote/config.json`'s `vaultPath` (validated; hard failure on mismatch).
+Standalone mode requires no CrickNote configuration.
 
 ## 11. Testing
 
@@ -314,42 +335,50 @@ PID/lock file is optional hardening.
   - `routing.py`: status/todos per type.
   - YAML escaper: titles with `"`, `:`, `\`, newlines, emoji; tag lists →
     re-parse to original values.
-  - **Create-once idempotency:** path-exists → adopt into state, **no** write
-    (assert `vault_write` not called); filename determinism + collision (same
-    minute+title, different `source_id`).
+  - **Create-once idempotency:** path-exists with matching `source_id` → adopt,
+    **no** write (assert `vault_write` not called); filename determinism +
+    collision (same minute+title, different `source_id`).
+  - **Adopt verification:** path-exists with missing/different `source_id` →
+    raises; neither adopts nor overwrites.
   - **Crash window:** note on disk but `source_id` absent from state → adopt, no
     rewrite.
+  - **Single-instance lock:** a second run with the lock held exits without
+    writing.
   - **Atomic save:** interrupted save leaves the prior `state.json` intact
     (temp + `os.replace`).
   - `vault_writer`: correct argv (subprocess mocked); CLI error **raises** (no
     direct-write); standalone mode writes directly.
-  - `config`: vault-equality mismatch fails; `MEMO_RELDIR` rejects absolute/`..`;
-    `USE_CRICKNOTE=true` + missing CLI fails.
+  - `config`: with `USE_CRICKNOTE=true`, vault-equality mismatch fails and missing
+    CLI fails; with `false`, `~/.cricknote/config.json` is not read; `MEMO_RELDIR`
+    rejects absolute/`..`.
   - `notes.py`: emits no `- [ ]` lines; no daily block.
 - **CrickNote:** no new engine code, so the existing **Vitest** suite is
-  regression-only — run it to confirm the baseline (it was interrupted in review,
-  so the baseline is currently unconfirmed). The `cricknote-voice-inbox` skill is
-  **Markdown orchestration that Vitest cannot exercise**; its behaviors
-  (multi-route, markers, resume from `in-progress`, dismiss, reclassify,
-  summarize-then-route for `analysis: pending`) are validated by **manual
-  acceptance tests**: scripted scenarios run through Claude Code and Codex against
-  a temp vault, with a written checklist (queue listing, idempotent re-run, no
-  duplicate append/task, status/disposition transitions).
+  regression-only (review confirmed a focused run green: 26 voice2note + 10
+  CrickNote tests passed; run the full suite to confirm the complete baseline).
+  The `cricknote-voice-inbox` skill is **Markdown orchestration that Vitest cannot
+  exercise**; its behaviors (multi-route, markers, resume from `in-progress`,
+  dismiss, reclassify, summarize-then-route for `analysis: pending`) are validated
+  by **manual acceptance tests**: scripted scenarios run through Claude Code and
+  Codex against a temp vault, with a written checklist (queue listing, idempotent
+  re-run, no duplicate append/task, **partial-retry completes the remaining
+  tasks**, status/disposition transitions).
 
 ## 12. Phases
 
-1. **voice2note:** classification + ambiguity rule; §6 contract + YAML escaper;
-   `routing.py`; `state.json` v2 + atomic save + create-once existence check;
+1. **voice2note:** mandatory `flock` single-instance lock; classification +
+   ambiguity rule; §6 contract + YAML escaper; `routing.py`; `state.json` v2 +
+   atomic save + create-once existence check (with `source_id` verification);
    `vault_writer.py` (no silent fallback; explicit `USE_CRICKNOTE`); config
-   validation; drop checkboxes + daily block. unittest throughout.
+   validation (gated on `USE_CRICKNOTE`); drop checkboxes + daily block. unittest
+   throughout.
 2. **CrickNote:** `cricknote-voice-inbox` skill (mandatory reindex, multi-route,
-   deterministic idea path, idempotency markers, resumable progress,
-   dismiss/reclassify, summarize-then-route) + daily-review hook +
-   `CLAUDE.md`/`AGENTS.md` template edits. Confirm the Vitest regression baseline;
-   run the manual acceptance tests against the real vault with both agents.
-3. **Hardening/docs:** LaunchAgent PATH/bin; READMEs in both repos; optional
-   PID lock; (optional, separate) crickNote `busy_timeout` PR if contention is
-   observed.
+   deterministic idea path with `source_id` check, per-task idempotency markers,
+   resumable progress, dismiss/reclassify, summarize-then-route) + daily-review
+   hook + `CLAUDE.md`/`AGENTS.md` template edits. Confirm the Vitest regression
+   baseline; run the manual acceptance tests against the real vault with both
+   agents.
+3. **Hardening/docs:** LaunchAgent PATH/bin; READMEs in both repos; (optional,
+   separate) crickNote `busy_timeout` PR if contention is observed.
 
 ## 13. Open questions
 
