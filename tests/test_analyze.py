@@ -1,6 +1,7 @@
 import unittest
 from types import SimpleNamespace
 from voice2note import analyze
+from voice2note.analyze import coerce_confidence
 
 
 class TestAnalyze(unittest.TestCase):
@@ -51,6 +52,45 @@ class TestAnalyze(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             analyze.analyze("hi", runner=fake_runner)
+
+
+class TestRecordingType(unittest.TestCase):
+    def _parse(self, **extra):
+        import json
+        from voice2note.analyze import parse_analysis
+        payload = {"summary": "s", "action_items": [], "topics": [],
+                   "notable_details": []}
+        payload.update(extra)
+        return parse_analysis(json.dumps(payload))
+
+    def test_extracts_recording_type(self):
+        self.assertEqual(self._parse(recording_type="talk")["recording_type"], "talk")
+
+    def test_missing_type_defaults_record(self):
+        self.assertEqual(self._parse()["recording_type"], "record")
+
+    def test_invalid_type_defaults_record(self):
+        self.assertEqual(self._parse(recording_type="podcast")["recording_type"], "record")
+
+    def test_confidence_extracted(self):
+        self.assertEqual(self._parse(confidence=0.8)["confidence"], 0.8)
+
+
+class TestCoerceConfidence(unittest.TestCase):
+    def test_numeric_string(self):
+        self.assertEqual(coerce_confidence("0.8"), 0.8)
+
+    def test_garbage_defaults_zero(self):
+        self.assertEqual(coerce_confidence("high"), 0.0)
+
+    def test_missing_defaults_zero(self):
+        self.assertEqual(coerce_confidence(None), 0.0)
+
+    def test_clamps_high(self):
+        self.assertEqual(coerce_confidence(1.5), 1.0)
+
+    def test_clamps_low(self):
+        self.assertEqual(coerce_confidence(-2), 0.0)
 
 
 if __name__ == "__main__":

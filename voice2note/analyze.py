@@ -10,6 +10,8 @@ import os
 import subprocess
 import tempfile
 
+from voice2note.routing import VALID_TYPES
+
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_REASONING = "low"
 
@@ -19,12 +21,22 @@ with ONLY a JSON object (no prose, no code fences) using exactly these keys:
 - "action_items": array of concrete to-dos or follow-ups mentioned (empty if none).
 - "topics": array of 2-6 short topic labels (single words or short phrases).
 - "notable_details": array of specific facts, names, numbers, or decisions worth keeping (empty if none).
+- "recording_type": one of "conversation" (a dialogue with other people), "talk" (a presentation you attended), or "record" (you dictating experiment notes, thoughts, or a new idea).
+- "confidence": a number from 0 to 1 for how sure you are of "recording_type".
 
 Transcript:
 \"\"\"
 {transcript}
 \"\"\"
 """
+
+
+def coerce_confidence(value):
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return min(1.0, max(0.0, f))
 
 
 def build_prompt(transcript):
@@ -40,11 +52,17 @@ def parse_analysis(text):
     def as_list(key):
         return [str(x).strip() for x in data.get(key, []) if str(x).strip()]
 
+    rtype = str(data.get("recording_type", "")).strip().lower()
+    if rtype not in VALID_TYPES:
+        rtype = "record"
+
     return {
         "summary": str(data.get("summary", "")).strip(),
         "action_items": as_list("action_items"),
         "topics": as_list("topics"),
         "notable_details": as_list("notable_details"),
+        "recording_type": rtype,
+        "confidence": coerce_confidence(data.get("confidence")),
     }
 
 
