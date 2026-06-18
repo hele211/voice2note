@@ -2,6 +2,7 @@
 import argparse
 import logging
 import os
+import shutil
 import sys
 from datetime import datetime
 
@@ -27,12 +28,25 @@ def setup_logging():
     )
 
 
-def vault_check_ok(cfg):
-    """Return True if vault config is consistent. Only validates the cricknote
-    vault match when USE_CRICKNOTE is true; standalone needs no cricknote config."""
+def assert_cricknote_ready(cfg):
+    """When routing through CrickNote, fail fast at startup (no silent fallback)
+    if the vault config is inconsistent or the cricknote CLI cannot be run.
+    No-op in standalone mode (which needs no CrickNote config at all)."""
     if not cfg.USE_CRICKNOTE:
-        return True
+        return
     cfg.assert_vault_match(str(cfg.VAULT), cfg.cricknote_vault_path())
+    if shutil.which(cfg.CRICKNOTE_BIN) is None and not (
+            os.path.isabs(cfg.CRICKNOTE_BIN) and os.access(cfg.CRICKNOTE_BIN, os.X_OK)):
+        raise SystemExit(
+            f"VOICE2NOTE_USE_CRICKNOTE=true but the cricknote CLI is not runnable: "
+            f"{cfg.CRICKNOTE_BIN!r}. Set VOICE2NOTE_CRICKNOTE_BIN to its absolute "
+            "path, or set VOICE2NOTE_USE_CRICKNOTE=false.")
+
+
+def vault_check_ok(cfg):
+    """True if CrickNote routing is fully configured (or standalone). Raises
+    SystemExit when USE_CRICKNOTE but the vault config or CLI is not ready."""
+    assert_cricknote_ready(cfg)
     return True
 
 
@@ -114,8 +128,7 @@ def run(once=False):
     if str(cfg.VAULT) in ("", ".", "/"):
         log.error("VOICE2NOTE_VAULT is not set. See README.")
         return
-    if cfg.USE_CRICKNOTE:
-        config.assert_vault_match(str(cfg.VAULT), config.cricknote_vault_path())
+    assert_cricknote_ready(cfg)
     try:
         with SingleInstanceLock(config.LOCK_PATH):
             _run_locked(once)

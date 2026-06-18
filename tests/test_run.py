@@ -92,5 +92,19 @@ class TestCheckGating(unittest.TestCase):
             config.USE_CRICKNOTE = orig
 
 
+class TestCricknoteReadiness(unittest.TestCase):
+    def test_standalone_is_noop(self):
+        runmod.assert_cricknote_ready(SimpleNamespace(USE_CRICKNOTE=False))
+
+    def test_missing_bin_hard_fails(self):
+        cfg = SimpleNamespace(
+            USE_CRICKNOTE=True, VAULT=Path("/tmp"),
+            CRICKNOTE_BIN="nonexistent-cricknote-bin-xyz",
+            assert_vault_match=lambda a, b: None,
+            cricknote_vault_path=lambda: "/tmp")
+        with self.assertRaises(SystemExit):
+            runmod.assert_cricknote_ready(cfg)
+
+
 if __name__ == "__main__":
     unittest.main()

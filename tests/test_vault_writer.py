@@ -53,5 +53,23 @@ class TestFsHelpers(unittest.TestCase):
         self.assertEqual(fm["recording_type"], "record")
 
 
+class TestRoundTrip(unittest.TestCase):
+    def test_source_id_with_quote_roundtrips(self):
+        from datetime import datetime
+        from voice2note.notes import render_memo_note
+        m = SimpleNamespace(id='A"B\\C.m4a', title="t",
+                            recorded_at=datetime(2026, 6, 18, 14, 32))
+        analysis = {"summary": "s", "action_items": [], "topics": [],
+                    "notable_details": []}
+        content = render_memo_note(m, analysis, "x", recording_type="record",
+                                   confidence=0.0, status="draft",
+                                   analysis_status="pending", include_todos=False)
+        vault = Path(tempfile.mkdtemp())
+        (vault / "Memory" / "voiceMemo").mkdir(parents=True)
+        rel = "Memory/voiceMemo/note.md"
+        (vault / rel).write_text(content, encoding="utf-8")
+        self.assertEqual(read_frontmatter(vault, rel)["source_id"], 'A"B\\C.m4a')
+
+
 if __name__ == "__main__":
     unittest.main()

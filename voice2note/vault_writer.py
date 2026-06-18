@@ -27,6 +27,43 @@ def note_exists(vault, rel_path):
 
 # Matches a top-level "key: value" frontmatter line (precompiled; scanned per line).
 _FM_LINE = re.compile(r'^([a-zA-Z_]+):\s*(.*)$')
+_DQ_SIMPLE = {"\\": "\\", '"': '"', "n": "\n", "t": "\t", "r": "\r"}
+
+
+def _unescape_dq(body):
+    """Reverse yamllite.dq escaping for a double-quoted scalar body (without the
+    surrounding quotes): handles \\\\, \\", \\n, \\t, \\r, and \\xNN. Keeps this
+    reader in sync with how notes.py writes values, so the adopt-check source_id
+    comparison matches a value that contained a quote or backslash."""
+    out = []
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch == "\\" and i + 1 < len(body):
+            nxt = body[i + 1]
+            if nxt == "x" and i + 3 < len(body):
+                try:
+                    out.append(chr(int(body[i + 2:i + 4], 16)))
+                    i += 4
+                    continue
+                except ValueError:
+                    pass
+            out.append(_DQ_SIMPLE.get(nxt, nxt))
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _scalar(raw):
+    """Decode a frontmatter scalar: double-quoted (unescaped), single-quoted, or bare."""
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
+        return _unescape_dq(raw[1:-1])
+    if len(raw) >= 2 and raw[0] == "'" and raw[-1] == "'":
+        return raw[1:-1].replace("''", "'")
+    return raw
 
 
 def read_frontmatter(vault, rel_path):
@@ -46,5 +83,5 @@ def read_frontmatter(vault, rel_path):
             break
         m = _FM_LINE.match(line)
         if m:
-            out[m.group(1)] = m.group(2).strip().strip("'\"")
+            out[m.group(1)] = _scalar(m.group(2))
     return out

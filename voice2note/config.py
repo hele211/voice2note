@@ -38,8 +38,6 @@ def _path(env, default):
 
 # --- Where notes are written (your Obsidian vault). VOICE2NOTE_VAULT is required. ---
 VAULT = _path("VOICE2NOTE_VAULT", "")
-DAILY_DIR = _path("VOICE2NOTE_DAILY_DIR", str(VAULT / "00_Journal" / "Daily"))
-MEMO_DIR = _path("VOICE2NOTE_MEMO_DIR", str(VAULT / "00_Journal" / "VoiceMemos"))
 
 # --- Engine state/logs (kept inside the project by default). ---
 STATE_PATH = _path("VOICE2NOTE_STATE", str(PROJECT_DIR / "state.json"))
