@@ -41,7 +41,7 @@ class TestMemos(unittest.TestCase):
             (rec / "rec1.m4a").write_bytes(b"x")
             (rec / "rec2.m4a").write_bytes(b"x")
             state = State(rec / "state.json")
-            state.mark_processed("rec1.m4a")
+            state.record("rec1.m4a", "x", "complete", "record")
             found = memos.find_new_memos(rec, rec / "missing.db", state)
             self.assertEqual([m.id for m in found], ["rec2.m4a"])
 
