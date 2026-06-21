@@ -23,7 +23,7 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 
 PY=/usr/bin/python3
 
-fail() { echo "FAIL: $*" >&2; exit 1; }
+fail() { printf '%b\n' "FAIL: $*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
 # 5.1 — Capture the REAL cricknote path BEFORE redirecting HOME.
@@ -203,7 +203,7 @@ esac
 
 # Frontmatter must contain the expected scalars. Parse via the engine's own reader
 # (vault_writer.read_frontmatter) so we test exactly what voice2note would read.
-PYTHONPATH="$PROJECT_DIR" $PY - "$VAULT_REAL" "$NOTE_REL" "$M4A_NAME" <<'PYEOF'
+PYTHONPATH="$PROJECT_DIR" $PY - "$VAULT_REAL" "$NOTE_REL" "$M4A_NAME" <<'PYEOF' || fail "frontmatter assertions failed"
 import sys
 from voice2note.vault_writer import read_frontmatter
 vault, rel, m4a = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -215,11 +215,10 @@ for k, v in exp.items():
         sys.exit(f"frontmatter {k}={got!r}, expected {v!r}")
 print("Frontmatter OK:", {k: fm.get(k) for k in exp})
 PYEOF
-[ $? -eq 0 ] || fail "frontmatter assertions failed"
 
 # state.json must record the memo id (the .m4a filename).
 [ -f "$STATE_PATH" ] || fail "state.json not written"
-PYTHONPATH="$PROJECT_DIR" $PY - "$STATE_PATH" "$M4A_NAME" <<'PYEOF'
+PYTHONPATH="$PROJECT_DIR" $PY - "$STATE_PATH" "$M4A_NAME" <<'PYEOF' || fail "state.json assertion failed"
 import json, sys
 state = json.load(open(sys.argv[1], encoding="utf-8"))
 mid = sys.argv[2]
@@ -227,7 +226,6 @@ if mid not in state.get("memos", {}):
     sys.exit(f"state.json memos missing {mid!r}; keys={list(state.get('memos', {}))}")
 print("state.json records memo:", mid)
 PYEOF
-[ $? -eq 0 ] || fail "state.json assertion failed"
 
 # ---------------------------------------------------------------------------
 # 5.3 — Reindex with the REAL CLI, then vault_list and verify the draft is indexed.
@@ -242,7 +240,7 @@ $CRICKNOTE_BIN tool vault_list '{"folder":"Memory/voiceMemo","status":"draft"}' 
 
 # Parse the ENVELOPE {"ok": true, "result": [...]}; fail closed if ok != true,
 # then search result[] for the created note by relpath or basename.
-PYTHONPATH="$PROJECT_DIR" $PY - "$LIST_FILE" "$NOTE_REL" "$NOTE_BASE" <<'PYEOF'
+PYTHONPATH="$PROJECT_DIR" $PY - "$LIST_FILE" "$NOTE_REL" "$NOTE_BASE" <<'PYEOF' || fail "vault_list did not contain the indexed draft"
 import json, os, sys
 data = json.load(open(sys.argv[1], encoding="utf-8"))
 rel, base = sys.argv[2], sys.argv[3]
@@ -261,7 +259,6 @@ for entry in result:
 else:
     sys.exit(f"created note {rel!r} not found in vault_list result ({len(result)} entries)")
 PYEOF
-[ $? -eq 0 ] || fail "vault_list did not contain the indexed draft"
 
 # ---------------------------------------------------------------------------
 # 5.3 — Run --once AGAIN: must remain idempotent (exactly one note).
@@ -292,14 +289,13 @@ N3="$(count_notes)"
 NOTE_PATH3="$(find "$MEMO_GLOB_DIR" -maxdepth 1 -type f -name '*.md')"
 [ "$NOTE_PATH3" = "$NOTE_PATH" ] || fail "adopt run changed the note path ($NOTE_PATH -> $NOTE_PATH3)"
 # State must have been re-recorded by the adopt branch.
-PYTHONPATH="$PROJECT_DIR" $PY - "$STATE_PATH" "$M4A_NAME" <<'PYEOF'
+PYTHONPATH="$PROJECT_DIR" $PY - "$STATE_PATH" "$M4A_NAME" <<'PYEOF' || fail "adopt-path state assertion failed"
 import json, sys
 state = json.load(open(sys.argv[1], encoding="utf-8"))
 if sys.argv[2] not in state.get("memos", {}):
     sys.exit("adopt branch did not re-record memo in state.json")
 print("adopt branch re-recorded memo in state.json:", sys.argv[2])
 PYEOF
-[ $? -eq 0 ] || fail "adopt-path state assertion failed"
 echo "Idempotent (create-once adopt): still exactly one note ($NOTE_BASE)."
 
 # ---------------------------------------------------------------------------
