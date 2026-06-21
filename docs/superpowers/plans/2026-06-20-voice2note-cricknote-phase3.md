@@ -12,6 +12,23 @@
 > instead of `/dev/null` (which is not `is_file()`); (4) §5.2 whisper stub writes
 > `<-of>.txt`; (5) `rg`→`grep` in verification snippets. Structure and scope
 > unchanged.
+>
+> **Revisions (2026-06-20, Codex review round 3):** seven Codex findings folded in —
+> §5.2 force-selects stubs via `VOICE2NOTE_FFMPEG`/`WHISPER_CLI`/`CODEX` env vars
+> (no fallthrough to real Codex/Whisper); §5.1 unifies config readers
+> (`CRICKNOTE_DATA_DIR="$HOME/.cricknote"`) + asserts both resolve the temp vault;
+> §6.3 made fail-closed (`set -euo pipefail`, trap, explicit `check_status`/`diff_status`);
+> §1.2 plist generated XML-safely (`plistlib`/escaping); §1.3 auto-enable gated on a
+> vault-match (mismatch → standalone+warn; explicit `true`+mismatch → fail); §1.1
+> adds tests (explicit-false-with-binary, invalid boolean, `MEMO_RELDIR` `..`/abs,
+> vault-mismatch, special-char escaping); §5.3 parses the `{ok,result}` envelope.
+> Structure and scope still unchanged.
+>
+> **Revisions (2026-06-20, Codex review round 4):** §6.3 snapshot is now tolerant of
+> a missing `Memory/voiceMemo/` (it does not exist on the real vault yet) — a
+> `snapshot_memo_dir` helper records `DIR|missing`/`DIR|exists` so `set -euo pipefail`
+> no longer aborts on `find` of an absent directory, and an unexpected directory
+> creation by `--check` would be caught. Codex confirmed the round-3 fixes adequate.
 
 **Goal:** Make the already-built voice2note↔CrickNote integration installable,
 understandable, and demonstrably safe: wire the LaunchAgent explicitly, discover
@@ -147,6 +164,20 @@ Cover these cases:
 - [ ] `--no-cricknote` wins even when a binary is discoverable.
 - [ ] Values explicitly supplied in the process environment win over values in
   the selected config file; values in that file win over auto/default values.
+- [ ] Explicit `false` (from env or config) with a discoverable binary still
+  produces `VOICE2NOTE_USE_CRICKNOTE=false` (auto-detect does not override it).
+- [ ] An invalid boolean (e.g. `maybe`) for `VOICE2NOTE_USE_CRICKNOTE` exits
+  nonzero with a clear error and writes no plist.
+- [ ] An absolute or `..`-containing `VOICE2NOTE_MEMO_RELDIR` is rejected
+  (mirrors `validate_memo_reldir`, `config.py:74-78`) — exits nonzero, no plist.
+- [ ] **Auto-detect with a vault mismatch installs standalone:** a discoverable
+  `cricknote` whose `~/.cricknote/config.json` `vaultPath` differs (by realpath)
+  from `VOICE2NOTE_VAULT` yields `VOICE2NOTE_USE_CRICKNOTE=false` + a warning
+  (not a broken enabled agent). With explicit `VOICE2NOTE_USE_CRICKNOTE=true`
+  and the same mismatch, the installer exits nonzero before writing the plist.
+- [ ] **Special characters are escaped:** a `VOICE2NOTE_VAULT` (and binary path)
+  containing spaces and `&` produces a well-formed plist that `plistlib.load`
+  parses, with the value round-tripping exactly (no XML/`sed` corruption).
 - [ ] Running the installer twice overwrites the generated plist cleanly and
   leaves one valid plist, proving idempotent reinstall behavior.
 
@@ -160,6 +191,14 @@ Under `EnvironmentVariables`, retain `PATH`, `PYTHONPATH`, and
 - `VOICE2NOTE_MEMO_RELDIR` → `__MEMO_RELDIR__`
 
 Do not add `busy_timeout` or any database variable.
+
+**Generate the plist XML-safely.** The current `sed` substitution into XML
+corrupts the plist if any value (vault path, binary path) contains `&`, `<`, `>`,
+or a `sed` replacement metacharacter. Either (a) XML-escape every substituted
+value before the `sed` pass (`&`→`&amp;`, `<`→`&lt;`, `>`→`&gt;`) **and** escape
+`sed` replacement specials, or (b) preferred — build the `EnvironmentVariables`
+dict and write the plist with Python `plistlib` so escaping is automatic. The
+escaping test in §1.1 (path with spaces + `&`) gates this.
 
 #### 1.3 Implement installer resolution rules
 
@@ -184,13 +223,21 @@ Concrete behavior:
 - [ ] Default `VOICE2NOTE_MEMO_RELDIR` to `Memory/voiceMemo`.
 - [ ] Resolve a supplied command name through `command -v`; retain an absolute,
   executable path in `VOICE2NOTE_CRICKNOTE_BIN`.
-- [ ] When discovery succeeds and use was not explicitly disabled, set use to
-  `true` and prepend the binary's directory to the plist `PATH` if it is absent.
+- [ ] When discovery succeeds and use was not explicitly disabled, **gate
+  auto-enable on a vault match:** read `~/.cricknote/config.json` `vaultPath` and
+  compare it by realpath to `VOICE2NOTE_VAULT`. If they match, set use to `true`
+  and prepend the binary's directory to the plist `PATH` if absent. If they do
+  **not** match (or the CrickNote config is unreadable), set use to `false`,
+  install standalone, and warn that integration was skipped because the vaults
+  differ — this avoids generating an agent that would fail at runtime via
+  `assert_vault_match` (`run.py:37`).
 - [ ] When automatic discovery fails, set use to `false`, keep installation
   successful, set the unused plist binary value to `cricknote`, and print how to
   install/configure CrickNote later.
 - [ ] When use is explicitly `true` but the selected binary cannot be resolved
-  to an executable, print an error and exit before writing/loading the plist.
+  to an executable **or the CrickNote config vault does not match
+  `VOICE2NOTE_VAULT`**, print an error and exit before writing/loading the plist
+  (no silent downgrade when the user explicitly asked for integration).
 - [ ] Replace all three new placeholders when generating the plist.
 - [ ] Print the final mode, binary path (when enabled), memo folder, and plist
   `PATH` alongside the existing vault/Python/interval summary.
@@ -329,16 +376,26 @@ vault. Use `mktemp -d` plus a cleanup trap. Capture the absolute real
 
 #### 5.1 Build an isolated environment
 
-- [ ] Create a temporary `HOME`, CrickNote data directory, vault, recordings
-  directory, state file, log, and lock.
-- [ ] Write the temporary CrickNote `config.json` with the temporary vault path.
-- [ ] Export both `HOME` and `CRICKNOTE_DATA_DIR` so voice2note and the CrickNote
-  CLI resolve the same isolated config.
+- [ ] Capture the absolute real `cricknote` path with `command -v cricknote`
+  **before** redirecting `HOME` (so discovery still works once `HOME` is temp).
+- [ ] Create a temporary `HOME`, vault, recordings directory, state file, log,
+  and lock under one `mktemp -d` root with a cleanup `trap`.
+- [ ] **Unify the two config readers.** voice2note reads the CrickNote vault from
+  `~/.cricknote/config.json` only — hardcoded `Path.home()/".cricknote"`
+  (`config.py:81-85`) — while the CrickNote CLI honors `CRICKNOTE_DATA_DIR`
+  (`crickNote/src/storage/database.ts:34`). So set
+  `CRICKNOTE_DATA_DIR="$HOME/.cricknote"` (with the temp `HOME`) and write a
+  single `config.json` there whose `vaultPath` is the temp vault — one file
+  serves both. Export `HOME` and `CRICKNOTE_DATA_DIR`.
+- [ ] **Assert both resolve the same vault before `--once`:** confirm
+  `cricknote`'s configured vault and voice2note's `cricknote_vault_path()` both
+  equal the temp vault (e.g. compare realpaths); abort the smoke if not. This
+  proves the isolation rather than assuming it.
 - [ ] Export:
 
   ```text
   VOICE2NOTE_USE_CRICKNOTE=true
-  VOICE2NOTE_CRICKNOTE_BIN=<absolute discovered CLI>
+  VOICE2NOTE_CRICKNOTE_BIN=<absolute discovered CLI captured above>
   VOICE2NOTE_MEMO_RELDIR=Memory/voiceMemo
   VOICE2NOTE_VAULT=<temporary vault>
   ```
@@ -348,7 +405,13 @@ vault. Use `mktemp -d` plus a cleanup trap. Capture the absolute real
 
 #### 5.2 Stub only the expensive upstream tools
 
-- [ ] Seed one non-empty fake `.m4a` memo.
+- [ ] Seed one non-empty fake `.m4a` memo (no `.icloud` placeholder, so
+  `materialize` skips `brctl` — `memos.py:71-75`).
+- [ ] **Select the stubs explicitly, not via `PATH`.** `config.py:54-60` resolves
+  each tool as `os.environ.get("VOICE2NOTE_*") or shutil.which(...)`, so export
+  the absolute stub paths — `VOICE2NOTE_FFMPEG`, `VOICE2NOTE_WHISPER_CLI`,
+  `VOICE2NOTE_CODEX` — to guarantee the fakes are used and the real Codex/Whisper
+  (network, model credits) can never be reached even if present on `PATH`.
 - [ ] Provide a fake ffmpeg executable that creates its requested WAV output.
 - [ ] Provide a fake Whisper executable that writes a deterministic transcript
   to `<-of value>.txt`. The real command is built as `-otxt -of <prefix>`
@@ -374,8 +437,10 @@ Do **not** stub the CrickNote CLI.
   `analysis: complete`, and `status: draft`.
 - [ ] Assert `state.json` records the memo.
 - [ ] Run the real CLI's `cricknote reindex`, then call
-  `vault_list` for `folder=Memory/voiceMemo,status=draft`; parse the JSON response
-  and assert it returns the created path.
+  `vault_list` for `folder=Memory/voiceMemo,status=draft`. The CLI returns the
+  envelope `{"ok": true, "result": [ ... ]}` (a wrapper, **not** a bare array) —
+  assert `ok === true`, then search `result[]` for an entry whose `path` is the
+  created note. Fail closed if `ok` is not `true`.
 - [ ] Run voice2note `--once` again and assert the vault still contains exactly
   one memo note, proving the smoke is idempotent.
 - [ ] Print a single clear `PASS` line and remove the temporary directory on
@@ -433,7 +498,13 @@ not assumed. Snapshot **only `Memory/voiceMemo/`** — the single subtree voice2
 could ever write — because a full-vault scan of a Nutstore-synced vault reports
 sync-daemon mtime/size churn that is noise, not voice2note activity:
 
+The snippet must **fail closed**: `set -euo pipefail`, a cleanup `trap` (so temp
+files are removed even on early exit), and explicit capture of both the `--check`
+exit status and the `diff` status — never let the trailing cleanup become the
+final (success) exit.
+
 ```bash
+set -euo pipefail
 CRICKNOTE_BIN="$(command -v cricknote)"
 REAL_VAULT="$(/usr/bin/python3 -c 'import json,pathlib; print(json.loads((pathlib.Path.home()/".cricknote/config.json").read_text())["vaultPath"])')"
 CHECK_LOG="$(mktemp)"
@@ -442,18 +513,38 @@ EMPTY_CFG="$(mktemp)"   # a real, EMPTY file — fully isolates from any project
                        #  so config.py would fall through to PROJECT_DIR/voice2note.env)
 BEFORE="$(mktemp)"
 AFTER="$(mktemp)"
+trap 'rm -f "$CHECK_LOG" "$EMPTY_CFG" "$BEFORE" "$AFTER"' EXIT
 MEMO_DIR="$REAL_VAULT/Memory/voiceMemo"
-find "$MEMO_DIR" -type f -exec stat -f '%N|%z|%m' {} \; 2>/dev/null | LC_ALL=C sort > "$BEFORE"
+
+# Snapshot tolerant of a MISSING dir: Memory/voiceMemo/ may not exist yet on the
+# real vault, and a bare `find` on a missing path exits nonzero — which, under
+# `set -euo pipefail`, would abort before --check ever runs. Recording existence
+# also catches --check unexpectedly *creating* the directory.
+snapshot_memo_dir() {
+  if [ -d "$MEMO_DIR" ]; then
+    { printf 'DIR|exists\n'; find "$MEMO_DIR" -type f -exec stat -f '%N|%z|%m' {} \; 2>/dev/null; } | LC_ALL=C sort
+  else
+    printf 'DIR|missing\n'
+  fi
+}
+snapshot_memo_dir > "$BEFORE"
+
+check_status=0
 VOICE2NOTE_CONFIG="$EMPTY_CFG" \
 VOICE2NOTE_USE_CRICKNOTE=true \
 VOICE2NOTE_CRICKNOTE_BIN="$CRICKNOTE_BIN" \
 VOICE2NOTE_MEMO_RELDIR=Memory/voiceMemo \
 VOICE2NOTE_VAULT="$REAL_VAULT" \
 VOICE2NOTE_LOG="$CHECK_LOG" \
-./run.sh --check
-find "$MEMO_DIR" -type f -exec stat -f '%N|%z|%m' {} \; 2>/dev/null | LC_ALL=C sort > "$AFTER"
-diff -u "$BEFORE" "$AFTER" && echo "READ-ONLY-OK: Memory/voiceMemo unchanged"
-rm -f "$CHECK_LOG" "$EMPTY_CFG" "$BEFORE" "$AFTER"
+./run.sh --check || check_status=$?
+
+snapshot_memo_dir > "$AFTER"
+diff_status=0
+diff -u "$BEFORE" "$AFTER" || diff_status=$?
+
+if [ "$check_status" -ne 0 ]; then echo "FAIL: --check exited $check_status"; exit 1; fi
+if [ "$diff_status" -ne 0 ]; then echo "FAIL: Memory/voiceMemo changed during --check"; exit 1; fi
+echo "READ-ONLY-OK: --check exited 0 and Memory/voiceMemo unchanged"
 ```
 
 Required evidence:
