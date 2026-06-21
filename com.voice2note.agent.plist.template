@@ -22,6 +22,12 @@
         <string>__PROJECT_DIR__</string>
         <key>VOICE2NOTE_VAULT</key>
         <string>__VAULT__</string>
+        <key>VOICE2NOTE_USE_CRICKNOTE</key>
+        <string>__USE_CRICKNOTE__</string>
+        <key>VOICE2NOTE_CRICKNOTE_BIN</key>
+        <string>__CRICKNOTE_BIN__</string>
+        <key>VOICE2NOTE_MEMO_RELDIR</key>
+        <string>__MEMO_RELDIR__</string>
     </dict>
     <key>StartInterval</key>
     <integer>__INTERVAL__</integer>
