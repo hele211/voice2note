@@ -34,6 +34,18 @@ class TestState(unittest.TestCase):
         self.assertTrue(again.is_seen("a.m4a"))
         self.assertEqual(again.last_run, "2026-06-18T14:00:00")
 
+    def test_pending_automation_is_retried_for_note_but_item_is_preserved(self):
+        s = State(self.path)
+        item = {"kind": "reminder", "id": "r-1", "title": "Call Mum"}
+        s.record_automation("a.m4a", item)
+        s.save()
+        again = State(self.path)
+        self.assertFalse(again.is_seen("a.m4a"))
+        self.assertEqual(again.automation_for("a.m4a"), item)
+        again.record("a.m4a", "Memory/voiceMemo/x.md", "complete", "record")
+        self.assertTrue(again.is_seen("a.m4a"))
+        self.assertEqual(again.automation_for("a.m4a"), item)
+
     def test_save_is_atomic_on_failure(self):
         self.path.write_text(json.dumps({"memos": {"old.m4a": {"analysis": "complete"}}}),
                              encoding="utf-8")

@@ -33,6 +33,7 @@ launchd (every ~2h)  →  python -m voice2note.run
    → ffmpeg → 16 kHz wav → whisper-cli              [local transcription]
    → codex exec (analysis → JSON)                   [your Codex login, no API key]
    → classify type + confidence                     [complete vs. draft status]
+   → if you said “CrickNote please”: create a macOS Reminder or Calendar event
    → write single note (create-once, idempotent)
        standalone: direct file write into vault
        cricknote:  cricknote tool vault_write        [when USE_CRICKNOTE=true]
@@ -123,6 +124,9 @@ Set in `voice2note.env` (or as environment variables). Only the vault is require
 | `VOICE2NOTE_CONFIDENCE_MIN` | `0.5` | Minimum classification confidence; below this the note is downgraded to `draft` |
 | `VOICE2NOTE_USE_CRICKNOTE` | `false` | Route note writes through the CrickNote CLI instead of a direct file write |
 | `VOICE2NOTE_CRICKNOTE_BIN` | _(auto-discovered)_ | Absolute path to the `cricknote` binary; defaults to `shutil.which("cricknote")` |
+| `VOICE2NOTE_APPLE_AUTOMATION` | `false` | Enable explicitly spoken Apple Reminders/Calendar commands |
+| `VOICE2NOTE_APPLE_REMINDERS_LIST` | default list | Optional exact Apple Reminders list name |
+| `VOICE2NOTE_APPLE_CALENDAR` | first writable calendar | Optional exact Apple Calendar name |
 
 Schedule frequency: `VOICE2NOTE_INTERVAL=<seconds> ./scripts/install.sh` (default 7200).
 
@@ -158,6 +162,39 @@ VOICE2NOTE_CRICKNOTE_BIN=/usr/local/bin/cricknote   # or wherever your binary li
 
 Then re-run `--check` to confirm the vault match and binary path are correct before
 starting the agent.
+
+## Apple Reminders and Calendar commands
+
+Voice2Note can create items in the built-in **Apple Reminders** and **Apple
+Calendar** apps. This is separate from CrickNote's Obsidian task list and is
+off by default. To enable it, add this to `voice2note.env`:
+
+```bash
+VOICE2NOTE_APPLE_AUTOMATION=true
+# Optional: choose specific destinations instead of the defaults.
+# VOICE2NOTE_APPLE_REMINDERS_LIST=Reminders
+# VOICE2NOTE_APPLE_CALENDAR=Calendar
+```
+
+Then speak the deliberate trigger **“CrickNote please”** in a Voice Memo. The
+phrase is case-insensitive; “Crick Note please” and the common transcription
+mistake “Cricket Note please” work too. Examples:
+
+- “CrickNote please, remind me to email Sarah tomorrow at 9.” → a Reminder.
+- “CrickNote please, meeting with Sarah this Friday at 2 pm for one hour.” → a
+  Calendar event.
+
+The analysis uses the meaning of the memo: tasks and follow-ups become
+Reminders; appointments and meetings with a clear date and time become Calendar
+events. It will not invent a time. A task without a stated time is still added
+to Reminders, but without a timed notification. A date without a time is also a
+Reminder, rather than an all-day Calendar event.
+
+The first command causes macOS to ask for permission to control Reminders or
+Calendar. Allow it. Each memo's created Apple item ID is saved before Voice2Note
+marks the memo finished, so if the vault write is retried it will not create a
+duplicate Apple item. The corresponding voice-memo note also shows the item
+created under **Apple action**.
 
 ## Troubleshooting
 

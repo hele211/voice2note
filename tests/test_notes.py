@@ -73,6 +73,16 @@ class TestRender(unittest.TestCase):
         self.assertIn("analysis: pending", out)
         self.assertIn("just the words", out)
 
+    def test_apple_item_is_visible_in_note(self):
+        out = render_memo_note(memo(), ANALYSIS, "t",
+                               recording_type="record", confidence=0.9,
+                               status="draft", analysis_status="complete",
+                               include_todos=True,
+                               apple_item={"kind": "reminder", "id": "r1", "title": "Call Mum"})
+        self.assertIn("apple_action: reminder", out)
+        self.assertIn("## Apple action", out)
+        self.assertIn("Created reminder: Call Mum", out)
+
 
 if __name__ == "__main__":
     unittest.main()

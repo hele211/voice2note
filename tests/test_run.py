@@ -15,6 +15,8 @@ def make_cfg(vault, use_cricknote=False):
         VAULT=Path(vault), MEMO_RELDIR="Memory/voiceMemo",
         USE_CRICKNOTE=use_cricknote, CRICKNOTE_BIN="cricknote",
         CONFIDENCE_MIN=0.5,
+        APPLE_AUTOMATION_ENABLED=False, APPLE_REMINDERS_LIST="",
+        APPLE_CALENDAR="", OSASCRIPT_BIN="/usr/bin/osascript",
         BRCTL_BIN="brctl", WHISPER_MODEL_PATH="model.bin",
         WHISPER_CLI_BIN="whisper-cli", FFMPEG_BIN="ffmpeg",
         WHISPER_LANGUAGE="auto", CODEX_BIN="codex", CODEX_MODEL="gpt-5.5")
@@ -30,6 +32,8 @@ class TestProcessMemo(unittest.TestCase):
         self.vault = tempfile.mkdtemp()
         self.state = State(Path(tempfile.mkdtemp()) / "state.json")
         self.cfg = make_cfg(self.vault)
+        original_create_apple_item = runmod.create_apple_item
+        self.addCleanup(setattr, runmod, "create_apple_item", original_create_apple_item)
         # Stub the heavy steps.
         runmod.materialize = lambda *a, **k: True
         runmod.transcribe = lambda *a, **k: "the transcript"
@@ -78,6 +82,33 @@ class TestProcessMemo(unittest.TestCase):
         self.assertIn("status: draft", out)
         self.assertIn("the transcript", out)
         self.assertTrue(self.state.is_seen("a.m4a"))  # recorded → not retried/overwritten
+
+    def test_triggered_apple_action_is_created_and_saved(self):
+        self.cfg.APPLE_AUTOMATION_ENABLED = True
+        runmod.transcribe = lambda *a, **k: "CrickNote please, remind me to call Mum."
+        runmod.analyze = lambda *a, **k: {
+            "summary": "s", "action_items": [], "topics": ["t"], "notable_details": [],
+            "recording_type": "record", "confidence": 0.9,
+            "apple_action": {"kind": "reminder", "title": "Call Mum", "remind_at": None}}
+        calls = []
+        runmod.create_apple_item = lambda *a, **k: calls.append((a, k)) or {
+            "kind": "reminder", "id": "r1", "title": "Call Mum"}
+        runmod.process_memo(memo(), self.state, self.cfg)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.state.automation_for("a.m4a")["id"], "r1")
+        rel = memo_note_relpath("Memory/voiceMemo", memo().recorded_at, "Idea", "a.m4a")
+        self.assertIn("Created reminder: Call Mum",
+                      (Path(self.vault) / rel).read_text(encoding="utf-8"))
+
+    def test_retry_after_apple_item_does_not_create_duplicate(self):
+        self.cfg.APPLE_AUTOMATION_ENABLED = True
+        self.state.record_automation("a.m4a", {"kind": "reminder", "id": "r1", "title": "Call Mum"})
+        calls = []
+        runmod.transcribe = lambda *a, **k: "CrickNote please, remind me to call Mum."
+        runmod.create_apple_item = lambda *a, **k: calls.append(True)
+        runmod.process_memo(memo(), self.state, self.cfg)
+        self.assertEqual(calls, [])
+        self.assertTrue(self.state.is_seen("a.m4a"))
 
 
 class TestCheckGating(unittest.TestCase):

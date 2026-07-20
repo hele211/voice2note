@@ -15,6 +15,7 @@ from voice2note.notes import memo_note_relpath, render_memo_note
 from voice2note.routing import effective_type, route_for
 from voice2note.vault_writer import write_note, note_exists, read_frontmatter
 from voice2note.lock import SingleInstanceLock, AlreadyRunning
+from voice2note.apple_automation import has_cricknote_request, create_apple_item
 
 log = logging.getLogger("voice2note")
 
@@ -43,10 +44,24 @@ def assert_cricknote_ready(cfg):
             "path, or set VOICE2NOTE_USE_CRICKNOTE=false.")
 
 
+def assert_apple_automation_ready(cfg):
+    """Fail early if the optional Apple-app integration cannot run at all."""
+    if not cfg.APPLE_AUTOMATION_ENABLED:
+        return
+    if sys.platform != "darwin":
+        raise SystemExit("VOICE2NOTE_APPLE_AUTOMATION=true requires macOS.")
+    binary = cfg.OSASCRIPT_BIN
+    if shutil.which(binary) is None and not (os.path.isabs(binary) and os.access(binary, os.X_OK)):
+        raise SystemExit(
+            "VOICE2NOTE_APPLE_AUTOMATION=true but osascript is not runnable: "
+            f"{binary!r}.")
+
+
 def vault_check_ok(cfg):
     """True if CrickNote routing is fully configured (or standalone). Raises
     SystemExit when USE_CRICKNOTE but the vault config or CLI is not ready."""
     assert_cricknote_ready(cfg)
+    assert_apple_automation_ready(cfg)
     return True
 
 
@@ -102,13 +117,14 @@ def process_memo(memo, state, cfg):
                             whisper_bin=cfg.WHISPER_CLI_BIN,
                             ffmpeg_bin=cfg.FFMPEG_BIN,
                             language=cfg.WHISPER_LANGUAGE)
+    apple_requested = has_cricknote_request(transcript)
+    apple_item = state.automation_for(memo.id)
     try:
-        analysis = analyze(transcript, codex_bin=cfg.CODEX_BIN, model=cfg.CODEX_MODEL)
+        analysis = analyze(transcript, codex_bin=cfg.CODEX_BIN, model=cfg.CODEX_MODEL,
+                           apple_automation_requested=apple_requested,
+                           current_time=datetime.now().astimezone().isoformat(timespec="minutes"))
         rtype = effective_type(analysis["recording_type"], analysis["confidence"], cfg.CONFIDENCE_MIN)
         status, include_todos = route_for(rtype)
-        content = render_memo_note(memo, analysis, transcript, recording_type=rtype,
-                                   confidence=analysis["confidence"], status=status,
-                                   analysis_status="complete", include_todos=include_todos)
         analysis_status = "complete"
     except Exception as exc:
         log.warning("Analysis failed for %s (%s); writing transcript-only draft.", memo.id, exc)
@@ -117,6 +133,26 @@ def process_memo(memo, state, cfg):
                                    confidence=0.0, status="draft",
                                    analysis_status="pending", include_todos=False)
         rtype, analysis_status = "record", "pending"
+        analysis = empty
+
+    # The trigger and environment setting are two independent gates.  Persist a
+    # successful Apple creation before the vault write; that way a write retry
+    # cannot create a duplicate reminder/event.
+    if apple_requested and cfg.APPLE_AUTOMATION_ENABLED and not apple_item:
+        apple_item = create_apple_item(
+            analysis.get("apple_action"), memo.id,
+            reminders_list=cfg.APPLE_REMINDERS_LIST,
+            calendar_name=cfg.APPLE_CALENDAR,
+            osascript_bin=cfg.OSASCRIPT_BIN)
+        if apple_item:
+            state.record_automation(memo.id, apple_item)
+            state.save()
+
+    if analysis_status == "complete":
+        content = render_memo_note(memo, analysis, transcript, recording_type=rtype,
+                                   confidence=analysis["confidence"], status=status,
+                                   analysis_status="complete", include_todos=include_todos,
+                                   apple_item=apple_item)
 
     write_memo(cfg, rel, content)
     state.record(memo.id, rel, analysis_status, rtype)
@@ -129,6 +165,7 @@ def run(once=False):
         log.error("VOICE2NOTE_VAULT is not set. See README.")
         return
     assert_cricknote_ready(cfg)
+    assert_apple_automation_ready(cfg)
     try:
         with SingleInstanceLock(config.LOCK_PATH):
             _run_locked(once)

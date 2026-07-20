@@ -23,7 +23,7 @@ def memo_note_relpath(reldir, recorded_at, title, source_id):
 
 
 def render_memo_note(memo, analysis, transcript, *, recording_type, confidence,
-                     status, analysis_status, include_todos):
+                     status, analysis_status, include_todos, apple_item=None):
     date = memo.recorded_at.strftime("%Y-%m-%d")
     topics = analysis.get("topics", [])
     fm = [
@@ -41,6 +41,7 @@ def render_memo_note(memo, analysis, transcript, *, recording_type, confidence,
         f"title: {dq(memo.title)}",
         f'recorded: "{memo.recorded_at.isoformat(timespec="minutes")}"',
         f"tags: {seq(['voice-memo'] + list(topics))}",
+        f"apple_action: {apple_item.get('kind') if apple_item else 'none'}",
         "---",
     ]
     body = [f"# {memo.title}", "", "## Summary", analysis.get("summary") or "—"]
@@ -51,6 +52,10 @@ def render_memo_note(memo, analysis, transcript, *, recording_type, confidence,
     body += ["", "## Topics", topic_line, "", "## Notable Details"]
     details = analysis.get("notable_details") or []
     body += [f"- {d}" for d in details] if details else ["- (none)"]
+    if apple_item:
+        kind = apple_item.get("kind", "item")
+        title = apple_item.get("title", "")
+        body += ["", "## Apple action", f"- Created {kind}: {title}"]
     body += ["", "## Transcript", "> [!quote]- Full transcript"]
     body += [f"> {line}" for line in (transcript or "").splitlines() or [""]]
     body.append("")

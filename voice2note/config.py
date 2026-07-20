@@ -71,6 +71,16 @@ def env_bool(name, default=False):
     return v.strip().lower() in ("1", "true", "yes", "on")
 
 
+# --- Optional, explicitly-triggered macOS Apple app automation. ---
+# Disabled by default so upgrading voice2note never creates external items until
+# the owner enables it in voice2note.env.  The phrase "CrickNote please" is a
+# second gate before either app is contacted.
+APPLE_AUTOMATION_ENABLED = env_bool("VOICE2NOTE_APPLE_AUTOMATION", False)
+APPLE_REMINDERS_LIST = os.environ.get("VOICE2NOTE_APPLE_REMINDERS_LIST", "").strip()
+APPLE_CALENDAR = os.environ.get("VOICE2NOTE_APPLE_CALENDAR", "").strip()
+OSASCRIPT_BIN = os.environ.get("VOICE2NOTE_OSASCRIPT", "/usr/bin/osascript")
+
+
 def validate_memo_reldir(reldir):
     p = PurePosixPath(reldir)
     if p.is_absolute() or ".." in p.parts:

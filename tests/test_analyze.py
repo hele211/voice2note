@@ -8,6 +8,14 @@ class TestAnalyze(unittest.TestCase):
     def test_build_prompt_includes_transcript(self):
         self.assertIn("buy milk", analyze.build_prompt("buy milk"))
 
+    def test_apple_prompt_adds_current_time_only_when_requested(self):
+        plain = analyze.build_prompt("buy milk")
+        automated = analyze.build_prompt("buy milk", apple_automation_requested=True,
+                                         current_time="2026-07-20T09:00+01:00")
+        self.assertNotIn('"apple_action"', plain)
+        self.assertIn('"apple_action"', automated)
+        self.assertIn("2026-07-20T09:00+01:00", automated)
+
     def test_parse_analysis_with_code_fence(self):
         text = '```json\n{"summary":"s","action_items":["a"],"topics":["t"],"notable_details":["n"]}\n```'
         out = analyze.parse_analysis(text)
@@ -20,6 +28,14 @@ class TestAnalyze(unittest.TestCase):
         out = analyze.parse_analysis('{"summary":"only"}')
         self.assertEqual(out["summary"], "only")
         self.assertEqual(out["action_items"], [])
+        self.assertEqual(out["apple_action"]["kind"], "none")
+
+    def test_parse_analysis_extracts_apple_action(self):
+        out = analyze.parse_analysis(
+            '{"summary":"s", "apple_action":{"kind":"calendar",'
+            '"title":"Team meeting", "start_at":"2026-07-21T10:00"}}')
+        self.assertEqual(out["apple_action"]["kind"], "calendar")
+        self.assertEqual(out["apple_action"]["title"], "Team meeting")
 
     def test_parse_analysis_no_json_raises(self):
         with self.assertRaises(ValueError):
