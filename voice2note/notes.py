@@ -1,7 +1,9 @@
-"""Render and write Obsidian notes from a memo + its analysis."""
+"""Render Obsidian notes for voice memos. Writes go through the caller
+(run.py → vault_writer or direct), not from here."""
+import hashlib
 import re
-from datetime import datetime
-from pathlib import Path
+
+from voice2note.yamllite import dq, seq
 
 
 def slugify(text, maxlen=50):
@@ -11,81 +13,50 @@ def slugify(text, maxlen=50):
     return text[:maxlen].strip("-") or "memo"
 
 
-def tagify(topic):
-    return "#" + slugify(topic, maxlen=40)
+def source_hash(source_id, n=16):
+    return hashlib.sha256((source_id or "").encode("utf-8")).hexdigest()[:n]
 
 
-def memo_filename(recorded_at, title):
-    return f"{recorded_at.strftime('%Y-%m-%d-%H%M')}-{slugify(title)}.md"
+def memo_note_relpath(reldir, recorded_at, title, source_id):
+    stamp = recorded_at.strftime("%Y-%m-%d-%H%M")
+    return f"{reldir.rstrip('/')}/{stamp}-{slugify(title)}-{source_hash(source_id)}.md"
 
 
-def render_memo_note(memo, analysis, transcript):
+def render_memo_note(memo, analysis, transcript, *, recording_type, confidence,
+                     status, analysis_status, include_todos, apple_item=None):
     date = memo.recorded_at.strftime("%Y-%m-%d")
-    time = memo.recorded_at.strftime("%H:%M")
-    safe_title = (memo.title or "Voice Memo").replace('"', "'")
-    fm_tags = ["voice-memo"] + [slugify(t, 40) for t in analysis["topics"]]
-    topic_line = " ".join(tagify(t) for t in analysis["topics"]) or "—"
-
-    out = ["---", f"date: {date}", f'time: "{time}"', "source: voice-memo",
-           f'title: "{safe_title}"', "tags:"]
-    out += [f"  - {t}" for t in fm_tags]
-    out += ["---", f"# {memo.title}", "", "## Summary", analysis["summary"] or "—",
-            "", "## Action Items"]
-    if analysis["action_items"]:
-        out += [f"- [ ] {item} 📅 {date}" for item in analysis["action_items"]]
-    else:
-        out.append("- (none)")
-    out += ["", "## Topics", topic_line, "", "## Notable Details"]
-    if analysis["notable_details"]:
-        out += [f"- {d}" for d in analysis["notable_details"]]
-    else:
-        out.append("- (none)")
-    out += ["", "## Transcript", "> [!quote]- Full transcript"]
-    out += [f"> {line}" for line in (transcript or "").splitlines() or [""]]
-    out.append("")
-    return "\n".join(out)
-
-
-def render_daily_block(memo, analysis, note_basename):
-    date = memo.recorded_at.strftime("%Y-%m-%d")
-    time = memo.recorded_at.strftime("%H:%M")
-    summary = analysis["summary"] or "voice memo"
-    lines = [f"- **{time} — {memo.title}** ([[{note_basename}|full note]]) — {summary}"]
-    lines += [f"  - [ ] {item} 📅 {date}" for item in analysis["action_items"]]
-    return "\n".join(lines)
-
-
-def write_memo_note(memo, analysis, transcript, memo_dir):
-    memo_dir = Path(memo_dir)
-    memo_dir.mkdir(parents=True, exist_ok=True)
-    path = memo_dir / memo_filename(memo.recorded_at, memo.title)
-    path.write_text(render_memo_note(memo, analysis, transcript), encoding="utf-8")
-    return path
-
-
-def ensure_daily_note(daily_dir, date_str):
-    daily_dir = Path(daily_dir)
-    path = daily_dir / f"{date_str}.md"
-    if not path.exists():
-        daily_dir.mkdir(parents=True, exist_ok=True)
-        pretty = datetime.strptime(date_str, "%Y-%m-%d").strftime("%B %-d, %Y")
-        path.write_text(
-            f"---\ndate: {date_str}\ntags:\n  - daily-note\n---\n# Daily Note: {pretty}\n",
-            encoding="utf-8",
-        )
-    return path
-
-
-def append_to_daily(memo, analysis, note_basename, daily_dir):
-    date_str = memo.recorded_at.strftime("%Y-%m-%d")
-    path = ensure_daily_note(daily_dir, date_str)
-    text = path.read_text(encoding="utf-8")
-    if "## Voice Memos" not in text:
-        if not text.endswith("\n"):
-            text += "\n"
-        text += "\n## Voice Memos\n"
-    if not text.endswith("\n"):
-        text += "\n"
-    text += render_daily_block(memo, analysis, note_basename) + "\n"
-    path.write_text(text, encoding="utf-8")
-    return path
+    topics = analysis.get("topics", [])
+    fm = [
+        "---",
+        f"date: {date}",
+        "type: voice-memo",
+        f"source_id: {dq(memo.id)}",
+        f"recording_type: {recording_type}",
+        f"classify_confidence: {confidence}",
+        f"analysis: {analysis_status}",
+        f"status: {status}",
+        "disposition:",
+        "routed_to: []",
+        "source: voice-memo",
+        f"title: {dq(memo.title)}",
+        f'recorded: "{memo.recorded_at.isoformat(timespec="minutes")}"',
+        f"tags: {seq(['voice-memo'] + list(topics))}",
+        f"apple_action: {apple_item.get('kind') if apple_item else 'none'}",
+        "---",
+    ]
+    body = [f"# {memo.title}", "", "## Summary", analysis.get("summary") or "—"]
+    if include_todos and analysis.get("action_items"):
+        body += ["", "## Possible to-dos"]
+        body += [f"- {item}" for item in analysis["action_items"]]
+    topic_line = " ".join("#" + slugify(t, 40) for t in topics) or "—"
+    body += ["", "## Topics", topic_line, "", "## Notable Details"]
+    details = analysis.get("notable_details") or []
+    body += [f"- {d}" for d in details] if details else ["- (none)"]
+    if apple_item:
+        kind = apple_item.get("kind", "item")
+        title = apple_item.get("title", "")
+        body += ["", "## Apple action", f"- Created {kind}: {title}"]
+    body += ["", "## Transcript", "> [!quote]- Full transcript"]
+    body += [f"> {line}" for line in (transcript or "").splitlines() or [""]]
+    body.append("")
+    return "\n".join(fm + [""] + body)

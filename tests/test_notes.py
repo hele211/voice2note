@@ -1,69 +1,87 @@
+# tests/test_notes.py
 import unittest
 from datetime import datetime
 from types import SimpleNamespace
-from voice2note import notes
 
-MEMO = SimpleNamespace(
-    id="rec1.m4a",
-    title="Project ideas: Q3",
-    recorded_at=datetime(2026, 6, 15, 14, 32),
-)
-ANALYSIS = {
-    "summary": "Notes about Q3 planning.",
-    "action_items": ["Email Sam about budget"],
-    "topics": ["planning", "budget"],
-    "notable_details": ["Deadline is July 1"],
-}
+from voice2note.notes import source_hash, memo_note_relpath, render_memo_note
 
 
-class TestNotes(unittest.TestCase):
-    def test_slugify(self):
-        self.assertEqual(notes.slugify("Project ideas: Q3"), "project-ideas-q3")
-        self.assertEqual(notes.slugify(""), "memo")
-
-    def test_memo_filename(self):
-        self.assertEqual(
-            notes.memo_filename(MEMO.recorded_at, MEMO.title),
-            "2026-06-15-1432-project-ideas-q3.md",
-        )
-
-    def test_render_memo_note_has_all_sections(self):
-        md = notes.render_memo_note(MEMO, ANALYSIS, "hello world")
-        self.assertIn("## Summary", md)
-        self.assertIn("- [ ] Email Sam about budget 📅 2026-06-15", md)
-        self.assertIn("#planning", md)
-        self.assertIn("- Deadline is July 1", md)
-        self.assertIn("> hello world", md)
-        self.assertIn("source: voice-memo", md)
-
-    def test_render_daily_block(self):
-        block = notes.render_daily_block(MEMO, ANALYSIS, "2026-06-15-1432-project-ideas-q3")
-        self.assertIn("**14:32 — Project ideas: Q3**", block)
-        self.assertIn("[[2026-06-15-1432-project-ideas-q3|full note]]", block)
-        self.assertIn("  - [ ] Email Sam about budget 📅 2026-06-15", block)
+def memo(title="Lysis ideas", mid="ABCD-1234.m4a"):
+    return SimpleNamespace(id=mid, title=title,
+                           recorded_at=datetime(2026, 6, 18, 14, 32))
 
 
-import tempfile
-from pathlib import Path
+ANALYSIS = {"summary": "Did the lysis.", "action_items": ["order ECL"],
+            "topics": ["western-blot"], "notable_details": ["pH 7.4"],
+            "recording_type": "record", "confidence": 0.9}
 
 
-class TestNoteWriting(unittest.TestCase):
-    def test_write_memo_note_creates_file(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = notes.write_memo_note(MEMO, ANALYSIS, "hello", Path(tmp))
-            self.assertTrue(path.exists())
-            self.assertEqual(path.name, "2026-06-15-1432-project-ideas-q3.md")
-            self.assertIn("## Summary", path.read_text(encoding="utf-8"))
+class TestPath(unittest.TestCase):
+    def test_hash_is_16_hex_and_stable(self):
+        h = source_hash("ABCD-1234.m4a")
+        self.assertEqual(len(h), 16)
+        self.assertEqual(h, source_hash("ABCD-1234.m4a"))
 
-    def test_append_to_daily_adds_header_once(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            daily = Path(tmp)
-            notes.append_to_daily(MEMO, ANALYSIS, "note-basename", daily)
-            notes.append_to_daily(MEMO, ANALYSIS, "note-basename", daily)
-            text = (daily / "2026-06-15.md").read_text(encoding="utf-8")
-            self.assertEqual(text.count("## Voice Memos"), 1)
-            self.assertEqual(text.count("**14:32 — Project ideas: Q3**"), 2)
-            self.assertIn("date: 2026-06-15", text)  # frontmatter created
+    def test_relpath_shape(self):
+        p = memo_note_relpath("Memory/voiceMemo", memo().recorded_at,
+                              "Lysis ideas", "ABCD-1234.m4a")
+        self.assertTrue(p.startswith("Memory/voiceMemo/2026-06-18-1432-lysis-ideas-"))
+        self.assertTrue(p.endswith(".md"))
+
+    def test_same_minute_title_different_id_no_collision(self):
+        a = memo_note_relpath("Memory/voiceMemo", memo().recorded_at, "X", "a.m4a")
+        b = memo_note_relpath("Memory/voiceMemo", memo().recorded_at, "X", "b.m4a")
+        self.assertNotEqual(a, b)
+
+
+class TestRender(unittest.TestCase):
+    def test_record_has_frontmatter_and_no_checkboxes(self):
+        out = render_memo_note(memo(), ANALYSIS, "raw transcript",
+                               recording_type="record", confidence=0.9,
+                               status="draft", analysis_status="complete",
+                               include_todos=True)
+        self.assertIn("recording_type: record", out)
+        self.assertIn("status: draft", out)
+        self.assertIn("analysis: complete", out)
+        self.assertIn('source_id: "ABCD-1234.m4a"', out)
+        self.assertNotIn("- [ ]", out)
+        self.assertIn("## Possible to-dos", out)
+        self.assertIn("- order ECL", out)
+        self.assertIn("raw transcript", out)
+
+    def test_conversation_omits_todos(self):
+        out = render_memo_note(memo(), ANALYSIS, "t",
+                               recording_type="conversation", confidence=0.9,
+                               status="complete", analysis_status="complete",
+                               include_todos=False)
+        self.assertNotIn("## Possible to-dos", out)
+
+    def test_title_with_quote_is_escaped(self):
+        out = render_memo_note(memo(title='He said "go"'), ANALYSIS, "t",
+                               recording_type="record", confidence=0.9,
+                               status="draft", analysis_status="complete",
+                               include_todos=True)
+        self.assertIn('title: "He said \\"go\\""', out)
+
+    def test_transcript_only_pending(self):
+        empty = {"summary": "", "action_items": [], "topics": [],
+                 "notable_details": [], "recording_type": "record", "confidence": 0.0}
+        out = render_memo_note(memo(), empty, "just the words",
+                               recording_type="record", confidence=0.0,
+                               status="draft", analysis_status="pending",
+                               include_todos=True)
+        self.assertIn("analysis: pending", out)
+        self.assertIn("just the words", out)
+
+    def test_apple_item_is_visible_in_note(self):
+        out = render_memo_note(memo(), ANALYSIS, "t",
+                               recording_type="record", confidence=0.9,
+                               status="draft", analysis_status="complete",
+                               include_todos=True,
+                               apple_item={"kind": "reminder", "id": "r1", "title": "Call Mum"})
+        self.assertIn("apple_action: reminder", out)
+        self.assertIn("## Apple action", out)
+        self.assertIn("Created reminder: Call Mum", out)
 
 
 if __name__ == "__main__":

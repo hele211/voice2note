@@ -53,7 +53,7 @@ def find_new_memos(recordings_dir, db_path, state):
     meta = load_db_metadata(db_path)
     result = []
     for path in list_m4a(recordings_dir):
-        if state.is_processed(path.name):
+        if state.is_seen(path.name):
             continue
         title, when = meta.get(path.name, (None, None))
         if when is None:

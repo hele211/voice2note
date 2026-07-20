@@ -5,9 +5,10 @@ Settings come from environment variables, optionally pre-loaded from a
 $VOICE2NOTE_CONFIG). The only required setting is VOICE2NOTE_VAULT — the path to
 your Obsidian vault (or wherever notes should be written).
 """
+import json
 import os
 import shutil
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
@@ -37,8 +38,6 @@ def _path(env, default):
 
 # --- Where notes are written (your Obsidian vault). VOICE2NOTE_VAULT is required. ---
 VAULT = _path("VOICE2NOTE_VAULT", "")
-DAILY_DIR = _path("VOICE2NOTE_DAILY_DIR", str(VAULT / "00_Journal" / "Daily"))
-MEMO_DIR = _path("VOICE2NOTE_MEMO_DIR", str(VAULT / "00_Journal" / "VoiceMemos"))
 
 # --- Engine state/logs (kept inside the project by default). ---
 STATE_PATH = _path("VOICE2NOTE_STATE", str(PROJECT_DIR / "state.json"))
@@ -63,3 +62,49 @@ CODEX_MODEL = os.environ.get("VOICE2NOTE_CODEX_MODEL", "gpt-5.5")
 
 # --- iCloud download helper. ---
 BRCTL_BIN = os.environ.get("VOICE2NOTE_BRCTL") or shutil.which("brctl") or "/usr/bin/brctl"
+
+
+def env_bool(name, default=False):
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+
+# --- Optional, explicitly-triggered macOS Apple app automation. ---
+# Disabled by default so upgrading voice2note never creates external items until
+# the owner enables it in voice2note.env.  The phrase "CrickNote please" is a
+# second gate before either app is contacted.
+APPLE_AUTOMATION_ENABLED = env_bool("VOICE2NOTE_APPLE_AUTOMATION", False)
+APPLE_REMINDERS_LIST = os.environ.get("VOICE2NOTE_APPLE_REMINDERS_LIST", "").strip()
+APPLE_CALENDAR = os.environ.get("VOICE2NOTE_APPLE_CALENDAR", "").strip()
+OSASCRIPT_BIN = os.environ.get("VOICE2NOTE_OSASCRIPT", "/usr/bin/osascript")
+
+
+def validate_memo_reldir(reldir):
+    p = PurePosixPath(reldir)
+    if p.is_absolute() or ".." in p.parts:
+        raise ValueError(f"VOICE2NOTE_MEMO_RELDIR must be relative without '..': {reldir!r}")
+    return str(p)
+
+
+def cricknote_vault_path():
+    """Read vaultPath from ~/.cricknote/config.json (raises if absent/malformed)."""
+    cfg = Path.home() / ".cricknote" / "config.json"
+    data = json.loads(cfg.read_text(encoding="utf-8"))
+    return data["vaultPath"]
+
+
+def assert_vault_match(v2n_vault, cricknote_vault):
+    if os.path.realpath(v2n_vault) != os.path.realpath(cricknote_vault):
+        raise SystemExit(
+            "VOICE2NOTE_VAULT does not match ~/.cricknote/config.json vaultPath:\n"
+            f"  voice2note: {v2n_vault}\n  cricknote:  {cricknote_vault}\n"
+            "Point both at the same vault, or set VOICE2NOTE_USE_CRICKNOTE=false.")
+
+
+USE_CRICKNOTE = env_bool("VOICE2NOTE_USE_CRICKNOTE", False)
+CRICKNOTE_BIN = os.environ.get("VOICE2NOTE_CRICKNOTE_BIN") or shutil.which("cricknote") or "cricknote"
+MEMO_RELDIR = validate_memo_reldir(os.environ.get("VOICE2NOTE_MEMO_RELDIR", "Memory/voiceMemo"))
+CONFIDENCE_MIN = float(os.environ.get("VOICE2NOTE_CONFIDENCE_MIN", "0.5"))
+LOCK_PATH = _path("VOICE2NOTE_LOCK", str(PROJECT_DIR / "voice2note.lock"))
