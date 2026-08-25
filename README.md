@@ -4,9 +4,10 @@ Turn your macOS **Voice Memos** into structured **Obsidian notes**, automaticall
 
 voice2note watches your Voice Memos, transcribes new ones **locally** with
 [whisper.cpp](https://github.com/ggerganov/whisper.cpp), then uses the
-[Codex CLI](https://github.com/openai/codex) to write a clean analysis into your
-vault — a summary, action items, topics, and notable details — every couple of
-hours, with **no API key** (it uses your existing Codex/ChatGPT login).
+[Claude Code CLI](https://github.com/anthropics/claude-code) to write a clean
+analysis into your vault — a summary, action items, topics, and notable
+details — every couple of hours, with **no API key** (it uses your existing
+Claude Code login).
 
 ## What you get, per memo
 
@@ -22,13 +23,13 @@ launchd (every ~2h)  →  python -m voice2note.run
    find new memos (CloudRecordings.db)         [Full Disk Access]
    → copy audio out of the protected folder    [Python has FDA; ffmpeg doesn't]
    → ffmpeg → 16 kHz wav → whisper-cli          [local transcription]
-   → codex exec (analysis → JSON)               [your Codex login, no API key]
+   → claude -p (analysis → JSON)                [your Claude Code login, no API key]
    → write per-memo note + daily-note summary   [into your Obsidian vault]
    → record processed id (no duplicates)
 ```
 
 Everything is local except the analysis step, which sends the **transcript text**
-(not audio) to your configured Codex model.
+(not audio) to your configured Claude model.
 
 ## Requirements
 
@@ -36,7 +37,8 @@ Everything is local except the analysis step, which sends the **transcript text*
 - **Python 3** (the system `/usr/bin/python3` is fine — standard library only)
 - **whisper.cpp**: `brew install whisper-cpp`
 - **ffmpeg**: `brew install ffmpeg`
-- **Codex CLI**, logged in: `npm install -g @openai/codex` then `codex login`
+- **Claude Code CLI**, logged in: `npm install -g @anthropic-ai/claude-code`, then
+  run `claude` once to log in
 
 ## Install
 
@@ -89,7 +91,7 @@ Set in `voice2note.env` (or as environment variables). Only the vault is require
 | `VOICE2NOTE_DAILY_DIR` | `<vault>/00_Journal/Daily` | Daily-notes folder |
 | `VOICE2NOTE_MODEL` | `./models/ggml-small.bin` | whisper.cpp model file |
 | `VOICE2NOTE_LANGUAGE` | `auto` | Transcription language (`auto`, `en`, `zh`, …) |
-| `VOICE2NOTE_CODEX_MODEL` | `gpt-5.5` | Codex model for analysis |
+| `VOICE2NOTE_CLAUDE_MODEL` | _(CLI/account default)_ | Claude model for analysis |
 
 Schedule frequency: `VOICE2NOTE_INTERVAL=<seconds> ./scripts/install.sh` (default 7200).
 
@@ -102,10 +104,12 @@ Schedule frequency: `VOICE2NOTE_INTERVAL=<seconds> ./scripts/install.sh` (defaul
 - **`whisper-cli ... Operation not permitted`.** ffmpeg/whisper can't open the
   protected file even when Python can; voice2note copies the audio to a temp file
   first, so this shouldn't happen — make sure you're on the latest version.
-- **Codex hangs or errors.** voice2note runs `codex exec --ignore-user-config -m
-  <model>` with `stdin` detached. `--ignore-user-config` avoids an invalid
-  `service_tier` in some `~/.codex/config.toml` files; set `VOICE2NOTE_CODEX_MODEL`
-  to a model your account supports.
+- **Claude hangs or errors.** voice2note runs `claude -p <prompt>` with `stdin`
+  detached — required under `launchd`, since a `claude -p` call with a TTY-less,
+  unclosed stdin would otherwise block forever waiting for input that never
+  comes. If it still fails, run `claude -p "hello"` manually first to confirm
+  you're logged in; set `VOICE2NOTE_CLAUDE_MODEL` if your account needs a
+  specific model.
 
 ## Development
 
@@ -114,7 +118,7 @@ PYTHONPATH=. /usr/bin/python3 -m unittest discover -s tests -t .
 ```
 
 No third-party Python packages — standard library only. External tools
-(`whisper-cli`, `ffmpeg`, `codex`) are called as subprocesses.
+(`whisper-cli`, `ffmpeg`, `claude`) are called as subprocesses.
 
 ## License
 

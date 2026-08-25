@@ -1,17 +1,16 @@
-"""Turn a transcript into structured analysis using the Codex CLI (`codex exec`).
+"""Turn a transcript into structured analysis using the Claude Code CLI (`claude -p`).
 
-Uses the existing Codex/ChatGPT login (~/.codex/auth.json) — no API key needed.
-`--ignore-user-config` avoids the user's config.toml (which may carry an invalid
-`service_tier` for ChatGPT-account auth); the model and reasoning effort are passed
-explicitly. Low reasoning keeps each analysis fast (~25s) — memo analysis is simple.
+Uses your existing Claude Code login — no API key needed. Non-interactive mode
+(`-p`) prints the final response and exits; it also skips the workspace-trust
+dialog and, run from a scratch cwd with no project permission grants, has no
+way to execute tool calls even if it wanted to — the prompt is pure text
+analysis, so none should be needed.
 """
 import json
-import os
 import subprocess
 import tempfile
 
-DEFAULT_MODEL = "gpt-5.5"
-DEFAULT_REASONING = "low"
+DEFAULT_MODEL = None  # let the CLI/account default decide unless overridden
 
 PROMPT = """You are analyzing a personal voice memo. Read the transcript and respond \
 with ONLY a JSON object (no prose, no code fences) using exactly these keys:
@@ -48,41 +47,28 @@ def parse_analysis(text):
     }
 
 
-def build_codex_cmd(prompt, out_path, codex_bin="codex", model=DEFAULT_MODEL,
-                    reasoning=DEFAULT_REASONING, cwd=None):
-    return [
-        codex_bin, "exec",
-        "--ignore-user-config",
-        "-m", model,
-        "-c", f"model_reasoning_effort={reasoning}",
-        "--skip-git-repo-check",
-        "--ephemeral",
-        "-s", "read-only",
-        "-C", cwd or tempfile.gettempdir(),
-        "-o", out_path,
-        prompt,
-    ]
+def build_claude_cmd(prompt, claude_bin="claude", model=None):
+    cmd = [claude_bin]
+    if model:
+        cmd += ["--model", model]
+    cmd += ["-p", prompt]
+    return cmd
 
 
-def analyze(transcript, codex_bin="codex", model=None, runner=subprocess.run):
+def analyze(transcript, claude_bin="claude", model=None, runner=subprocess.run):
     model = model or DEFAULT_MODEL
-    fd, out_path = tempfile.mkstemp(suffix=".json")
-    os.close(fd)
-    try:
-        cmd = build_codex_cmd(build_prompt(transcript), out_path, codex_bin, model)
-        # stdin=DEVNULL is essential: `codex exec` reads piped stdin if present, so
-        # without a TTY (detached / launchd) it would block forever waiting for EOF.
-        proc = runner(cmd, capture_output=True, text=True, errors="replace", timeout=300,
-                      stdin=subprocess.DEVNULL)
-        if proc.returncode != 0:
-            raise RuntimeError(f"codex failed (exit {proc.returncode}): {(proc.stderr or '')[:300]}")
-        with open(out_path, encoding="utf-8", errors="replace") as fh:
-            content = fh.read()
-    finally:
-        try:
-            os.unlink(out_path)
-        except OSError:
-            pass
+    cmd = build_claude_cmd(build_prompt(transcript), claude_bin, model)
+    # stdin=DEVNULL is essential: without a TTY (detached / launchd), claude -p
+    # would otherwise block forever waiting for stdin to close.
+    # cwd=a fresh temp dir, not the vault: no project .claude/settings.json
+    # there means no permission rule can pre-approve a tool call, so even if
+    # the model tried to act on something (it shouldn't — the prompt is pure
+    # text analysis) it would just be silently denied, not executed.
+    proc = runner(cmd, capture_output=True, text=True, errors="replace", timeout=300,
+                  stdin=subprocess.DEVNULL, cwd=tempfile.gettempdir())
+    if proc.returncode != 0:
+        raise RuntimeError(f"claude failed (exit {proc.returncode}): {(proc.stderr or '')[:300]}")
+    content = proc.stdout
     if not content.strip():
-        raise RuntimeError("codex returned an empty response")
+        raise RuntimeError("claude returned an empty response")
     return parse_analysis(content)

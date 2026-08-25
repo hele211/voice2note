@@ -51,7 +51,7 @@ def process_memo(memo, state):
                             language=config.WHISPER_LANGUAGE)
     note_basename = memo_filename(memo.recorded_at, memo.title)[:-3]  # drop ".md"
     try:
-        analysis = analyze(transcript, codex_bin=config.CODEX_BIN, model=config.CODEX_MODEL)
+        analysis = analyze(transcript, claude_bin=config.CLAUDE_BIN, model=config.CLAUDE_MODEL)
     except Exception as exc:
         log.warning("Analysis failed for %s (%s); writing transcript-only note, will retry.",
                     memo.id, exc)
