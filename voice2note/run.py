@@ -1,5 +1,6 @@
 """Orchestrator: find new memos, transcribe, analyze, write notes, track state."""
 import argparse
+import fcntl
 import logging
 import os
 import sys
@@ -66,31 +67,59 @@ def process_memo(memo, state):
     log.info("Done: %s", memo.id)
 
 
+def _acquire_lock():
+    """Exclusive, non-blocking lock so two runs (a manual --once alongside the
+    scheduled LaunchAgent, or two overlapping LaunchAgent fires) can't race on
+    state.json. Each run loads state into memory once at the start and writes
+    it back at the end — without this, a second run's save() can silently
+    overwrite a first run's in-flight update, dropping a processed-id and
+    causing a wasted (though harmless, since notes are write-once by id)
+    transcribe+analyze retry. Returns an open, locked file handle to hold for
+    the run's duration, or None if another run already holds it.
+    """
+    config.LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = open(config.LOCK_PATH, "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_file.close()
+        return None
+    return lock_file
+
+
 def run(once=False):
     if str(config.VAULT) in ("", ".", "/"):
         log.error("VOICE2NOTE_VAULT is not set — set it in voice2note.env or the LaunchAgent. See README.")
         return
-    state = State(config.STATE_PATH)
+    lock_file = _acquire_lock()
+    if lock_file is None:
+        log.warning("Another voice2note run is already in progress (lock held) — skipping this run.")
+        return
     try:
-        memos = find_new_memos(config.RECORDINGS_DIR, config.DB_PATH, state)
-    except PermissionError:
-        log.error("Full Disk Access not granted — cannot read Voice Memos. See README step 1.")
-        return
-    except FileNotFoundError:
-        log.error("Recordings folder not found: %s", config.RECORDINGS_DIR)
-        return
-    if once:
-        memos = memos[-1:]  # newest unprocessed only, for a quick test
-    if not memos:
-        log.info("No new memos.")
-        return
-    log.info("%d new memo(s) to process.", len(memos))
-    for memo in memos:
+        state = State(config.STATE_PATH)
         try:
-            process_memo(memo, state)
-        except Exception:
-            log.exception("Failed on %s; leaving unprocessed for retry.", memo.id)
-    state.save(last_run=datetime.now().isoformat(timespec="seconds"))
+            memos = find_new_memos(config.RECORDINGS_DIR, config.DB_PATH, state)
+        except PermissionError:
+            log.error("Full Disk Access not granted — cannot read Voice Memos. See README step 1.")
+            return
+        except FileNotFoundError:
+            log.error("Recordings folder not found: %s", config.RECORDINGS_DIR)
+            return
+        if once:
+            memos = memos[-1:]  # newest unprocessed only, for a quick test
+        if not memos:
+            log.info("No new memos.")
+            return
+        log.info("%d new memo(s) to process.", len(memos))
+        for memo in memos:
+            try:
+                process_memo(memo, state)
+            except Exception:
+                log.exception("Failed on %s; leaving unprocessed for retry.", memo.id)
+        state.save(last_run=datetime.now().isoformat(timespec="seconds"))
+    finally:
+        fcntl.flock(lock_file, fcntl.LOCK_UN)
+        lock_file.close()
 
 
 def main(argv=None):

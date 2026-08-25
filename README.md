@@ -104,6 +104,11 @@ Schedule frequency: `VOICE2NOTE_INTERVAL=<seconds> ./scripts/install.sh` (defaul
 - **`whisper-cli ... Operation not permitted`.** ffmpeg/whisper can't open the
   protected file even when Python can; voice2note copies the audio to a temp file
   first, so this shouldn't happen — make sure you're on the latest version.
+- **"Another voice2note run is already in progress — skipping."** A manual
+  `--once` overlapped with the scheduled `launchd` run (or two scheduled runs
+  overlapped each other). Expected and harmless — it just means this run
+  didn't start; wait for the other one to finish and try again, or check
+  `logs/run.log` for what it's currently processing.
 - **Claude hangs or errors.** voice2note runs `claude -p <prompt>` with `stdin`
   detached — required under `launchd`, since a `claude -p` call with a TTY-less,
   unclosed stdin would otherwise block forever waiting for input that never

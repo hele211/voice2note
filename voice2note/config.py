@@ -44,6 +44,11 @@ MEMO_DIR = _path("VOICE2NOTE_MEMO_DIR", str(VAULT / "00_Journal" / "VoiceMemos")
 STATE_PATH = _path("VOICE2NOTE_STATE", str(PROJECT_DIR / "state.json"))
 LOG_PATH = _path("VOICE2NOTE_LOG", str(PROJECT_DIR / "logs" / "run.log"))
 
+# --- Concurrency guard: only one run() at a time (see run.py's _acquire_lock).
+# Co-located with STATE_PATH rather than a fixed name, so distinct state
+# files (e.g. two configs pointed at different vaults) get distinct locks. ---
+LOCK_PATH = STATE_PATH.with_suffix(".lock")
+
 # --- macOS Voice Memos source (TCC-protected; needs Full Disk Access). ---
 RECORDINGS_DIR = _path(
     "VOICE2NOTE_RECORDINGS",
