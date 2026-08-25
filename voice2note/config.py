@@ -44,6 +44,11 @@ MEMO_DIR = _path("VOICE2NOTE_MEMO_DIR", str(VAULT / "00_Journal" / "VoiceMemos")
 STATE_PATH = _path("VOICE2NOTE_STATE", str(PROJECT_DIR / "state.json"))
 LOG_PATH = _path("VOICE2NOTE_LOG", str(PROJECT_DIR / "logs" / "run.log"))
 
+# --- Concurrency guard: only one run() at a time (see run.py's _acquire_lock).
+# Co-located with STATE_PATH rather than a fixed name, so distinct state
+# files (e.g. two configs pointed at different vaults) get distinct locks. ---
+LOCK_PATH = STATE_PATH.with_suffix(".lock")
+
 # --- macOS Voice Memos source (TCC-protected; needs Full Disk Access). ---
 RECORDINGS_DIR = _path(
     "VOICE2NOTE_RECORDINGS",
@@ -57,9 +62,9 @@ FFMPEG_BIN = os.environ.get("VOICE2NOTE_FFMPEG") or shutil.which("ffmpeg") or "f
 WHISPER_MODEL_PATH = _path("VOICE2NOTE_MODEL", str(PROJECT_DIR / "models" / "ggml-small.bin"))
 WHISPER_LANGUAGE = os.environ.get("VOICE2NOTE_LANGUAGE", "auto")  # 'auto', 'en', 'zh', ...
 
-# --- Analysis via the Codex CLI (`codex exec`), using your Codex/ChatGPT login. ---
-CODEX_BIN = os.environ.get("VOICE2NOTE_CODEX") or shutil.which("codex") or "codex"
-CODEX_MODEL = os.environ.get("VOICE2NOTE_CODEX_MODEL", "gpt-5.5")
+# --- Analysis via the Claude Code CLI (`claude -p`), using your existing login. ---
+CLAUDE_BIN = os.environ.get("VOICE2NOTE_CLAUDE") or shutil.which("claude") or "claude"
+CLAUDE_MODEL = os.environ.get("VOICE2NOTE_CLAUDE_MODEL", "")
 
 # --- iCloud download helper. ---
 BRCTL_BIN = os.environ.get("VOICE2NOTE_BRCTL") or shutil.which("brctl") or "/usr/bin/brctl"

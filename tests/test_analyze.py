@@ -1,3 +1,4 @@
+import subprocess
 import unittest
 from types import SimpleNamespace
 from voice2note import analyze
@@ -24,22 +25,23 @@ class TestAnalyze(unittest.TestCase):
         with self.assertRaises(ValueError):
             analyze.parse_analysis("no json here")
 
-    def test_build_codex_cmd(self):
-        cmd = analyze.build_codex_cmd("PROMPT", "/tmp/o.json", "codex", "gpt-5.5")
-        self.assertEqual(cmd[:2], ["codex", "exec"])
-        self.assertIn("--ignore-user-config", cmd)
-        self.assertIn("-o", cmd)
-        self.assertIn("/tmp/o.json", cmd)
-        self.assertIn("gpt-5.5", cmd)
-        self.assertIn("model_reasoning_effort=low", cmd)
+    def test_build_claude_cmd_no_model(self):
+        cmd = analyze.build_claude_cmd("PROMPT", "claude", None)
+        self.assertEqual(cmd, ["claude", "-p", "PROMPT"])
+
+    def test_build_claude_cmd_with_model(self):
+        cmd = analyze.build_claude_cmd("PROMPT", "claude", "claude-sonnet-5")
+        self.assertEqual(cmd, ["claude", "--model", "claude-sonnet-5", "-p", "PROMPT"])
         self.assertEqual(cmd[-1], "PROMPT")
 
-    def test_analyze_reads_codex_output_file(self):
+    def test_analyze_reads_claude_stdout(self):
         def fake_runner(cmd, capture_output=True, text=True, timeout=None, **kwargs):
-            out = cmd[cmd.index("-o") + 1]
-            with open(out, "w", encoding="utf-8") as fh:
-                fh.write('{"summary":"s","action_items":["a"],"topics":["t"],"notable_details":[]}')
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
+            self.assertEqual(kwargs.get("stdin"), subprocess.DEVNULL)
+            return SimpleNamespace(
+                returncode=0,
+                stdout='{"summary":"s","action_items":["a"],"topics":["t"],"notable_details":[]}',
+                stderr="",
+            )
 
         out = analyze.analyze("hi", runner=fake_runner)
         self.assertEqual(out["summary"], "s")
@@ -48,6 +50,13 @@ class TestAnalyze(unittest.TestCase):
     def test_analyze_nonzero_exit_raises(self):
         def fake_runner(cmd, capture_output=True, text=True, timeout=None, **kwargs):
             return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+
+        with self.assertRaises(RuntimeError):
+            analyze.analyze("hi", runner=fake_runner)
+
+    def test_analyze_empty_stdout_raises(self):
+        def fake_runner(cmd, capture_output=True, text=True, timeout=None, **kwargs):
+            return SimpleNamespace(returncode=0, stdout="   ", stderr="")
 
         with self.assertRaises(RuntimeError):
             analyze.analyze("hi", runner=fake_runner)

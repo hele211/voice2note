@@ -35,5 +35,37 @@ class TestRun(unittest.TestCase):
             self.assertFalse(state.is_processed("a.m4a"))
 
 
+class TestRunLock(unittest.TestCase):
+    def test_acquire_lock_blocks_second_caller(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lock_path = Path(tmp) / "state.lock"
+            with patch("voice2note.config.LOCK_PATH", lock_path):
+                first = run._acquire_lock()
+                try:
+                    self.assertIsNotNone(first)
+                    self.assertIsNone(run._acquire_lock())
+                finally:
+                    first.close()
+                # released now — a fresh caller can acquire it again
+                second = run._acquire_lock()
+                self.assertIsNotNone(second)
+                second.close()
+
+    @patch("voice2note.run.find_new_memos")
+    def test_run_skips_entirely_when_lock_already_held(self, mock_find_new_memos):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            with patch("voice2note.config.LOCK_PATH", tmp / "state.lock"), \
+                 patch("voice2note.config.VAULT", tmp / "vault"), \
+                 patch("voice2note.config.STATE_PATH", tmp / "state.json"):
+                held = run._acquire_lock()
+                self.assertIsNotNone(held)
+                try:
+                    run.run()  # a concurrent run — must see the lock held and bail out
+                finally:
+                    held.close()
+        mock_find_new_memos.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

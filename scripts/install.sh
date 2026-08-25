@@ -24,7 +24,7 @@ fi
 
 command -v whisper-cli >/dev/null || echo "WARN: whisper-cli not found  ->  brew install whisper-cpp"
 command -v ffmpeg      >/dev/null || echo "WARN: ffmpeg not found       ->  brew install ffmpeg"
-command -v codex       >/dev/null || echo "WARN: codex not found        ->  npm i -g @openai/codex && codex login"
+command -v claude      >/dev/null || echo "WARN: claude not found       ->  npm i -g @anthropic-ai/claude-code && claude"
 [ -f "$PROJECT_DIR/models/ggml-small.bin" ] || echo "WARN: model missing      ->  ./scripts/download-model.sh"
 
 mkdir -p "$LA_DIR" "$PROJECT_DIR/logs"
