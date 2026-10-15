@@ -10,7 +10,12 @@ from voice2note.state import State
 from voice2note.memos import find_new_memos, materialize
 from voice2note.transcribe import transcribe
 from voice2note.analyze import analyze
-from voice2note.notes import write_memo_note, append_to_daily, memo_filename
+from voice2note.notes import (
+    append_diary_capture,
+    append_to_daily,
+    memo_filename,
+    write_memo_note,
+)
 
 log = logging.getLogger("voice2note")
 
@@ -40,7 +45,19 @@ def check_access():
     return True
 
 
-def process_memo(memo, state):
+def process_memo(memo, state, capture_mode=None):
+    """Process one memo in the configured capture mode.
+
+    ``diary-first`` is deliberately transcript-only: it writes to the recording
+    date's daily inbox before any interpretation and never calls Codex. The
+    established ``memo-first`` flow remains the default for existing installs.
+    """
+    capture_mode = capture_mode or config.CAPTURE_MODE
+    if capture_mode not in config.VALID_CAPTURE_MODES:
+        raise ValueError(
+            f"Invalid VOICE2NOTE_CAPTURE_MODE={capture_mode!r}; "
+            "use 'memo-first' or 'diary-first'."
+        )
     log.info("Processing %s (%s)", memo.title, memo.id)
     if not materialize(memo.path, brctl_bin=config.BRCTL_BIN):
         log.warning("Could not download %s from iCloud; will retry next run.", memo.id)
@@ -49,6 +66,14 @@ def process_memo(memo, state):
                             whisper_bin=config.WHISPER_CLI_BIN,
                             ffmpeg_bin=config.FFMPEG_BIN,
                             language=config.WHISPER_LANGUAGE)
+    if capture_mode == "diary-first":
+        # Do not summarize, route, or otherwise interpret raw capture. If this
+        # write raises, the recording is intentionally left unprocessed for retry.
+        append_diary_capture(memo, transcript, config.DAILY_DIR)
+        state.mark_processed(memo.id)
+        state.save(last_run=datetime.now().isoformat(timespec="seconds"))
+        log.info("Captured to diary: %s", memo.id)
+        return
     note_basename = memo_filename(memo.recorded_at, memo.title)[:-3]  # drop ".md"
     try:
         analysis = analyze(transcript, codex_bin=config.CODEX_BIN, model=config.CODEX_MODEL)
@@ -70,6 +95,11 @@ def run(once=False):
     if str(config.VAULT) in ("", ".", "/"):
         log.error("VOICE2NOTE_VAULT is not set — set it in voice2note.env or the LaunchAgent. See README.")
         return
+    capture_mode = config.CAPTURE_MODE
+    if capture_mode not in config.VALID_CAPTURE_MODES:
+        log.error("Invalid VOICE2NOTE_CAPTURE_MODE=%r; use 'memo-first' or 'diary-first'.",
+                  capture_mode)
+        return
     state = State(config.STATE_PATH)
     try:
         memos = find_new_memos(config.RECORDINGS_DIR, config.DB_PATH, state)
@@ -87,7 +117,7 @@ def run(once=False):
     log.info("%d new memo(s) to process.", len(memos))
     for memo in memos:
         try:
-            process_memo(memo, state)
+            process_memo(memo, state, capture_mode=capture_mode)
         except Exception:
             log.exception("Failed on %s; leaving unprocessed for retry.", memo.id)
     state.save(last_run=datetime.now().isoformat(timespec="seconds"))
