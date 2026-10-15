@@ -40,6 +40,10 @@ VAULT = _path("VOICE2NOTE_VAULT", "")
 DAILY_DIR = _path("VOICE2NOTE_DAILY_DIR", str(VAULT / "00_Journal" / "Daily"))
 MEMO_DIR = _path("VOICE2NOTE_MEMO_DIR", str(VAULT / "00_Journal" / "VoiceMemos"))
 
+# --- Capture behavior. Keep the established per-memo/Codex flow unless opted in. ---
+CAPTURE_MODE = os.environ.get("VOICE2NOTE_CAPTURE_MODE", "memo-first").strip().lower()
+VALID_CAPTURE_MODES = {"memo-first", "diary-first"}
+
 # --- Engine state/logs (kept inside the project by default). ---
 STATE_PATH = _path("VOICE2NOTE_STATE", str(PROJECT_DIR / "state.json"))
 LOG_PATH = _path("VOICE2NOTE_LOG", str(PROJECT_DIR / "logs" / "run.log"))
